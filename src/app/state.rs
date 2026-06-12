@@ -595,6 +595,7 @@ pub struct WorktreeRemoveState {
     pub workspace_id: String,
     pub repo_root: std::path::PathBuf,
     pub path: std::path::PathBuf,
+    pub workspace_name: String,
     pub error: Option<String>,
     pub removing: bool,
     pub force_confirmation: bool,
@@ -605,6 +606,7 @@ pub struct WorktreeOpenEntry {
     pub path: std::path::PathBuf,
     pub branch: Option<String>,
     pub is_linked_worktree: bool,
+    pub workspace_name: String,
     pub already_open_ws_idx: Option<usize>,
 }
 

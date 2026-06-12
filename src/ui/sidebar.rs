@@ -1482,6 +1482,7 @@ mod tests {
                 repo_root: std::path::PathBuf::from("/repo/herdr"),
                 checkout_path: std::path::PathBuf::from(checkout_key),
                 is_linked_worktree: name != "main",
+                workspace_name: "default".into(),
             });
         }
         ws

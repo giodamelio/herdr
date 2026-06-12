@@ -3099,6 +3099,7 @@ mod tests {
             repo_root: "/repo/herdr".into(),
             checkout_path: format!("/repo/worktree-{ws_idx}").into(),
             is_linked_worktree: true,
+            workspace_name: "default".into(),
         });
     }
 
@@ -3109,6 +3110,7 @@ mod tests {
             repo_root: "/repo/herdr".into(),
             checkout_path: "/repo/herdr".into(),
             is_linked_worktree: false,
+            workspace_name: "default".into(),
         });
     }
 
@@ -4105,6 +4107,7 @@ mod tests {
             repo_root: "/repo/herdr".into(),
             checkout_path: "/repo/herdr".into(),
             is_linked_worktree: false,
+            workspace_name: "default".into(),
         });
         state.workspaces[1].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
             key: "repo-key".into(),
@@ -4112,6 +4115,7 @@ mod tests {
             repo_root: "/repo/herdr".into(),
             checkout_path: "/repo/herdr-issue".into(),
             is_linked_worktree: true,
+            workspace_name: "default".into(),
         });
         state.selected = 0;
         state.active = Some(0);

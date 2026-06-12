@@ -774,6 +774,7 @@ mod tests {
             repo_root: "/repo/herdr".into(),
             checkout_path: "/repo/herdr".into(),
             is_linked_worktree: false,
+            workspace_name: "default".into(),
         });
         let mut child = Workspace::test_new("issue");
         child.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
@@ -782,6 +783,7 @@ mod tests {
             repo_root: "/repo/herdr".into(),
             checkout_path: "/repo/herdr-issue".into(),
             is_linked_worktree: true,
+            workspace_name: "default".into(),
         });
         app.workspaces = vec![parent, child];
         app.selected = 0;
