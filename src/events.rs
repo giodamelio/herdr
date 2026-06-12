@@ -20,6 +20,9 @@ pub struct ApiWorktreeAddRequest {
     pub source_repo_root: std::path::PathBuf,
     pub repo_key: String,
     pub repo_name: String,
+    /// jj workspace name for the checkout being created (the handle
+    /// `jj workspace forget` will need later).
+    pub workspace_name: String,
     pub label: Option<String>,
     pub focus: bool,
     pub respond_to: std::sync::mpsc::Sender<String>,

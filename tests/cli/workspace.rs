@@ -372,18 +372,19 @@ fn worktree_open_existing_checkout_by_path_and_branch() {
     let checkout = base.join("external-checkout");
     create_committed_repo(&repo);
     let branch = "worktree/cli-open-existing";
-    run_git(
-        &repo,
+    run_jj(
+        Some(&repo),
         &[
-            "worktree",
+            "workspace",
             "add",
-            "--quiet",
-            "-b",
-            branch,
+            "--name",
+            "worktree-cli-open-existing",
+            "-r",
+            "@",
             checkout.to_str().unwrap(),
-            "HEAD",
         ],
     );
+    run_jj(Some(&checkout), &["bookmark", "create", branch, "-r", "@"]);
 
     let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
     wait_for_socket(&socket_path, Duration::from_secs(5));

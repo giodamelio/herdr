@@ -7,9 +7,9 @@ use super::{
     config::{deps_current, read_config, stamp, upstream_full_ref, ConfigCtx, FileDep},
     discovery::{
         automatic_workspace_label, canonicalize_best_effort_path, fallback_label_from_cwd,
-        git_ref_storage_is_reftable, git_rev_parse_verify, git_space_metadata_from_info,
-        git_symbolic_head_full, git_worktree_info, read_git_ref_file, read_ref_oid,
-        GitWorktreeInfo,
+        git_branch, git_ref_storage_is_reftable, git_rev_parse_verify, git_space_metadata,
+        git_space_metadata_from_info, git_symbolic_head_full, git_worktree_info, jj_read,
+        jj_read_stdout, jj_workspace_root, read_git_ref_file, read_ref_oid, GitWorktreeInfo,
     },
 };
 
@@ -33,9 +33,36 @@ impl GitStatusRefreshDemand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitStatusCacheEntry {
-    pub fingerprint: Option<GitStatusFingerprint>,
+    pub fingerprint: Option<StatusFingerprint>,
     pub retry_after: Option<Instant>,
     pub snapshot: WorkspaceGitStatusSnapshot,
+}
+
+/// Which VCS produced the cached identity. Herdr builds worktrees on jj
+/// workspaces, but plain git checkouts still take the git path.
+// The git variant carries a whole `RepoContext`, so it dwarfs the jj one. Only
+// one entry is cached per workspace, so the wasted bytes are not worth paying
+// an allocation for every git fingerprint.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatusFingerprint {
+    Git(GitStatusFingerprint),
+    Jj(JjStatusFingerprint),
+}
+
+/// Cheap identity used to decide whether cached ahead/behind counts are still
+/// valid. Recomputed counts are only needed when the working-copy commit, the
+/// bookmark, or its tracked remote target moves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JjStatusFingerprint {
+    pub workspace_root: PathBuf,
+    pub branch: Option<String>,
+    /// Commit the local bookmark points at. Ahead/behind is measured from the
+    /// bookmark (not `@`, which is an empty commit on top of it), so the cache
+    /// must invalidate when the bookmark moves.
+    pub branch_commit: Option<String>,
+    pub remote: Option<String>,
+    pub upstream_commit: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +109,9 @@ pub struct GitUpstreamIdentity {
 }
 
 pub fn git_status_cache_key(cwd: &Path) -> Option<PathBuf> {
+    if let Some(root) = jj_workspace_root(cwd) {
+        return Some(canonicalize_best_effort_path(&root));
+    }
     git_worktree_info(cwd).map(|info| canonicalize_best_effort_path(&info.repo_root))
 }
 
@@ -111,8 +141,17 @@ pub fn git_status_snapshot_for_cwd_with_demand(
         return (cached.snapshot.clone(), Some(cached.clone()));
     }
 
+    // Herdr builds worktrees on jj workspaces, so a jj workspace answers first
+    // and only plain git checkouts fall through to the git path below.
+    if let Some(root) = jj_workspace_root(cwd) {
+        return jj_status_snapshot(cwd, &root, cached, demand);
+    }
+
     let repository_context = cached
-        .and_then(|entry| entry.fingerprint.as_ref())
+        .and_then(|entry| match entry.fingerprint.as_ref() {
+            Some(StatusFingerprint::Git(fingerprint)) => Some(fingerprint),
+            Some(StatusFingerprint::Jj(_)) | None => None,
+        })
         .map(|fingerprint| fingerprint.repository_context.clone())
         .filter(|context| deps_current(&context.2))
         .or_else(|| repo_context(cwd));
@@ -151,7 +190,7 @@ pub fn git_status_snapshot_for_cwd_with_demand(
         return (
             snapshot.clone(),
             fingerprint.map(|fingerprint| GitStatusCacheEntry {
-                fingerprint: Some(fingerprint),
+                fingerprint: Some(StatusFingerprint::Git(fingerprint)),
                 retry_after: None,
                 snapshot,
             }),
@@ -171,7 +210,8 @@ pub fn git_status_snapshot_for_cwd_with_demand(
     };
     let branch = fingerprint.branch_name().map(str::to_string);
 
-    if let Some(cached) = cached.filter(|entry| entry.fingerprint.as_ref() == Some(&fingerprint)) {
+    let wrapped = StatusFingerprint::Git(fingerprint.clone());
+    if let Some(cached) = cached.filter(|entry| entry.fingerprint.as_ref() == Some(&wrapped)) {
         let snapshot = WorkspaceGitStatusSnapshot {
             auto_label,
             branch,
@@ -181,7 +221,7 @@ pub fn git_status_snapshot_for_cwd_with_demand(
         return (
             snapshot.clone(),
             Some(GitStatusCacheEntry {
-                fingerprint: Some(fingerprint),
+                fingerprint: Some(wrapped),
                 retry_after: None,
                 snapshot,
             }),
@@ -201,7 +241,66 @@ pub fn git_status_snapshot_for_cwd_with_demand(
     (
         snapshot.clone(),
         Some(GitStatusCacheEntry {
-            fingerprint: Some(fingerprint),
+            fingerprint: Some(wrapped),
+            retry_after: None,
+            snapshot,
+        }),
+    )
+}
+
+/// Status for a jj workspace, mirroring the git path's demand and cache rules.
+fn jj_status_snapshot(
+    cwd: &Path,
+    root: &Path,
+    cached: Option<&GitStatusCacheEntry>,
+    demand: GitStatusRefreshDemand,
+) -> (WorkspaceGitStatusSnapshot, Option<GitStatusCacheEntry>) {
+    let auto_label = automatic_workspace_label(cwd, root);
+    let space = git_space_metadata(cwd);
+
+    if !demand.ahead_behind {
+        return (
+            WorkspaceGitStatusSnapshot {
+                auto_label,
+                branch: demand.branch.then(|| git_branch(root)).flatten(),
+                ahead_behind: None,
+                space,
+            },
+            None,
+        );
+    }
+
+    let branch = git_branch(root);
+    let fingerprint = JjStatusFingerprint::compute(root, branch.clone());
+    let wrapped = StatusFingerprint::Jj(fingerprint.clone());
+
+    if let Some(cached) = cached.filter(|entry| entry.fingerprint.as_ref() == Some(&wrapped)) {
+        let snapshot = WorkspaceGitStatusSnapshot {
+            auto_label,
+            branch,
+            ahead_behind: cached.snapshot.ahead_behind,
+            space,
+        };
+        return (
+            snapshot.clone(),
+            Some(GitStatusCacheEntry {
+                fingerprint: Some(wrapped),
+                retry_after: None,
+                snapshot,
+            }),
+        );
+    }
+
+    let snapshot = WorkspaceGitStatusSnapshot {
+        auto_label,
+        branch,
+        ahead_behind: fingerprint.compute_ahead_behind(root),
+        space,
+    };
+    (
+        snapshot.clone(),
+        Some(GitStatusCacheEntry {
+            fingerprint: Some(wrapped),
             retry_after: None,
             snapshot,
         }),
@@ -342,6 +441,109 @@ fn parse_git_ahead_behind_output(stdout: &str) -> Option<(usize, usize)> {
     Some((ahead, behind))
 }
 
+impl JjStatusFingerprint {
+    fn compute(root: &Path, branch: Option<String>) -> Self {
+        let workspace_root = canonicalize_best_effort_path(root);
+        let branch_commit = branch
+            .as_deref()
+            .and_then(|branch| jj_local_bookmark_commit(root, branch));
+        let (remote, upstream_commit) = match branch.as_deref() {
+            Some(branch) => match jj_tracked_remote(root, branch) {
+                Some(remote) => {
+                    let target = jj_remote_target(root, branch, &remote);
+                    (Some(remote), target)
+                }
+                None => (None, None),
+            },
+            None => (None, None),
+        };
+        JjStatusFingerprint {
+            workspace_root,
+            branch,
+            branch_commit,
+            remote,
+            upstream_commit,
+        }
+    }
+
+    fn compute_ahead_behind(&self, root: &Path) -> Option<(usize, usize)> {
+        let branch = self.branch.as_deref()?;
+        let remote = self.remote.as_deref()?;
+        // Only meaningful when the tracked remote actually points somewhere.
+        self.upstream_commit.as_ref()?;
+        jj_ahead_behind(root, branch, remote)
+    }
+}
+fn jj_local_bookmark_commit(root: &Path, branch: &str) -> Option<String> {
+    jj_read_stdout(
+        root,
+        &["log", "-r", branch, "--no-graph", "-T", "commit_id"],
+    )
+}
+
+/// The remote that the local bookmark tracks. Prefers `origin`; ignores the
+/// colocated `git` backing remote.
+fn jj_tracked_remote(root: &Path, branch: &str) -> Option<String> {
+    let output = jj_read_stdout(
+        root,
+        &[
+            "bookmark",
+            "list",
+            "--all-remotes",
+            branch,
+            "-T",
+            "if(remote && tracked && remote != \"git\", remote ++ \"\\n\", \"\")",
+        ],
+    )?;
+    let remotes: Vec<&str> = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    remotes
+        .iter()
+        .find(|remote| **remote == "origin")
+        .or_else(|| remotes.first())
+        .map(|remote| remote.to_string())
+}
+
+fn jj_remote_target(root: &Path, branch: &str, remote: &str) -> Option<String> {
+    jj_read_stdout(
+        root,
+        &[
+            "log",
+            "-r",
+            &format!("{branch}@{remote}"),
+            "--no-graph",
+            "-T",
+            "commit_id",
+        ],
+    )
+}
+
+fn jj_ahead_behind(root: &Path, branch: &str, remote: &str) -> Option<(usize, usize)> {
+    // Measure the local bookmark against its remote (not `@`, which is an empty
+    // working-copy commit on top of the bookmark and would always read +1).
+    let remote_ref = format!("{branch}@{remote}");
+    let ahead = jj_count_revset(root, &format!("{remote_ref}..{branch}"))?;
+    let behind = jj_count_revset(root, &format!("{branch}..{remote_ref}"))?;
+    Some((ahead, behind))
+}
+
+fn jj_count_revset(root: &Path, revset: &str) -> Option<usize> {
+    let output = jj_read(root, &["log", "-r", revset, "--no-graph", "-T", "\"x\\n\""])?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    Some(
+        stdout
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,7 +655,7 @@ mod tests {
         write_fake_tracked_repo(&root);
         let fingerprint = git_status_fingerprint(&root).unwrap();
         let cached = GitStatusCacheEntry {
-            fingerprint: Some(fingerprint),
+            fingerprint: Some(StatusFingerprint::Git(fingerprint)),
             retry_after: None,
             snapshot: WorkspaceGitStatusSnapshot {
                 auto_label: "repo".into(),
@@ -478,7 +680,7 @@ mod tests {
         write_fake_tracked_repo(&root);
         let fingerprint = git_status_fingerprint(&root).unwrap();
         let cached = GitStatusCacheEntry {
-            fingerprint: Some(fingerprint),
+            fingerprint: Some(StatusFingerprint::Git(fingerprint)),
             retry_after: None,
             snapshot: WorkspaceGitStatusSnapshot {
                 auto_label: "repo".into(),
@@ -513,7 +715,7 @@ mod tests {
         write_fake_tracked_repo(&root);
         let fingerprint = git_status_fingerprint(&root).unwrap();
         let cached = GitStatusCacheEntry {
-            fingerprint: Some(fingerprint),
+            fingerprint: Some(StatusFingerprint::Git(fingerprint)),
             retry_after: None,
             snapshot: WorkspaceGitStatusSnapshot {
                 auto_label: "repo".into(),
@@ -550,7 +752,10 @@ mod tests {
 
         let (_, updated) = git_status_snapshot_for_cwd(&root, cached.as_ref());
 
-        let upstream = updated.unwrap().fingerprint.unwrap().upstream.unwrap();
+        let StatusFingerprint::Git(fingerprint) = updated.unwrap().fingerprint.unwrap() else {
+            panic!("git checkout produced a non-git fingerprint");
+        };
+        let upstream = fingerprint.upstream.unwrap();
         assert_eq!(upstream.remote, "fork");
         std::fs::remove_dir_all(root).unwrap();
     }

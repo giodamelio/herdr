@@ -496,10 +496,11 @@ impl ClientShellState {
                 }
                 true
             }
+            // A checkout jj no longer tracks is recovered by the remove itself
+            // when it still belongs to this repo, and forcing cannot help when
+            // it does not, so uncommitted changes are the only escalation.
             (PendingEndpointKind::WorktreeRemove { forced: false }, Err(error))
-                if error.code.as_deref() == Some("dirty_worktree_requires_force")
-                    || (error.code.as_deref() == Some("worktree_remove_failed")
-                        && crate::worktree::is_not_working_tree_remove_error(&error.message)) =>
+                if error.code.as_deref() == Some("dirty_worktree_requires_force") =>
             {
                 if let Some(ClientShellOverlay::WorktreeRemove(remove)) = self.overlay.as_mut() {
                     remove.removing = false;

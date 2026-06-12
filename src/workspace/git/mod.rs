@@ -3,8 +3,10 @@ mod config;
 mod config_tests;
 mod discovery;
 mod status;
+// Reachable beyond `workspace::git` so app-level tests can build the colocated
+// jj+git repos the worktree tests need.
 #[cfg(test)]
-pub(super) mod test_support;
+pub(crate) mod test_support;
 
 pub(crate) use self::discovery::automatic_workspace_label;
 

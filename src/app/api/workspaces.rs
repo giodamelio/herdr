@@ -566,6 +566,7 @@ mod tests {
             repo_root: "/repo/herdr".into(),
             checkout_path: "/repo/herdr-issue".into(),
             is_linked_worktree: true,
+            workspace_name: "default".into(),
         });
         app
     }
@@ -579,6 +580,7 @@ mod tests {
             repo_root: "/repo/herdr".into(),
             checkout_path: "/repo/herdr".into(),
             is_linked_worktree: false,
+            workspace_name: "default".into(),
         });
         app.state.workspaces.insert(0, parent);
         app.state.active = Some(1);

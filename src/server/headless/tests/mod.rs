@@ -3430,41 +3430,18 @@ async fn deferred_worktree_open_disconnect_keeps_other_clients_focus() {
     let mut source = crate::workspace::Workspace::test_new("pending-open-source");
     let repo = std::env::temp_dir().join(format!("herdr-disconnected-open-{}", source.id));
     let checkout = repo.with_extension("checkout");
-    let git = |args: &[&str]| {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    };
-    git(&["init", "--quiet", repo.to_str().unwrap()]);
-    git(&[
-        "-C",
-        repo.to_str().unwrap(),
-        "-c",
-        "user.name=Herdr Test",
-        "-c",
-        "user.email=herdr@example.invalid",
-        "commit",
-        "--quiet",
-        "--allow-empty",
-        "-m",
-        "initial",
-    ]);
-    git(&[
-        "-C",
-        repo.to_str().unwrap(),
-        "worktree",
-        "add",
-        "--quiet",
-        "-b",
+    // Reruns share this path because the workspace id is deterministic.
+    let _ = std::fs::remove_dir_all(&repo);
+    let _ = std::fs::remove_dir_all(&checkout);
+    std::fs::create_dir_all(&repo).unwrap();
+    crate::workspace::git::test_support::init_colocated_repo(&repo);
+    crate::worktree::run_worktree_commands(&crate::worktree::build_worktree_add_commands(
+        &repo,
+        &checkout,
         "pending-open",
-        checkout.to_str().unwrap(),
-    ]);
+        "HEAD",
+    ))
+    .unwrap();
     source.identity_cwd = repo.clone();
     let source_id = source.id.clone();
     let mut target = crate::workspace::Workspace::test_new("pending-open-target");
@@ -3495,7 +3472,7 @@ async fn deferred_worktree_open_disconnect_keeps_other_clients_focus() {
     });
     entered
         .recv_timeout(Duration::from_secs(5))
-        .expect("Git started");
+        .expect("worktree discovery started");
     server.handle_server_event(ServerEvent::ClientDisconnected { client_id: 51 });
     release.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -3520,13 +3497,11 @@ async fn deferred_worktree_open_disconnect_keeps_other_clients_focus() {
         "disconnected endpoint must not turn into public navigation"
     );
     shutdown_test_runtimes(&mut server);
-    git(&[
-        "-C",
-        repo.to_str().unwrap(),
-        "worktree",
-        "remove",
-        checkout.to_str().unwrap(),
-    ]);
+    let _ = crate::worktree::remove_worktree_checkout(
+        &repo,
+        &crate::worktree::workspace_name_for_branch("pending-open"),
+        &checkout,
+    );
     let _ = std::fs::remove_dir_all(repo);
 }
 
@@ -4907,6 +4882,7 @@ fn terminal_attach_client_exits_when_worktree_remove_succeeds() {
         repo_root: "/repo/herdr".into(),
         checkout_path: checkout.clone(),
         is_linked_worktree: true,
+        workspace_name: "herdr-issue".into(),
     });
     let workspace_id = workspace.id.clone();
     let pane_id = workspace.tabs[0].root_pane;

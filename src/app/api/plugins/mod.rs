@@ -3028,6 +3028,7 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_CONTEXT_JSON\" > {}"]
             repo_root: "/repo/herdr".into(),
             checkout_path: "/repo/herdr-issue".into(),
             is_linked_worktree: true,
+            workspace_name: "default".into(),
         });
         let workspace = app.workspace_info(0);
         let worktree = crate::api::schema::WorktreeInfo {
@@ -3046,6 +3047,7 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_CONTEXT_JSON\" > {}"]
             repo_root: "/repo/herdr".into(),
             checkout_path: "/repo/herdr-other".into(),
             is_linked_worktree: true,
+            workspace_name: "default".into(),
         });
         let changed_context = app.plugin_context_for_event(
             &crate::api::schema::EventEnvelope {
@@ -3312,6 +3314,7 @@ action = "missing"
             repo_root: "/repo/herdr".into(),
             checkout_path: "/repo/herdr-issue".into(),
             is_linked_worktree: true,
+            workspace_name: "default".into(),
         });
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let pane_public = app.public_pane_id(0, pane_id).unwrap();

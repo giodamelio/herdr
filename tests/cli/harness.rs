@@ -50,14 +50,45 @@ pub(super) fn run_git(repo: &Path, args: &[&str]) {
     );
 }
 
+/// Path to an empty jj config, so test repos never inherit the developer's own
+/// settings. A personal `immutable_heads()` revset otherwise makes freshly
+/// created test commits immutable and every `jj describe` fails.
+pub(super) fn isolated_jj_config() -> PathBuf {
+    static CONFIG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            let path = std::env::temp_dir()
+                .join(format!("herdr-cli-jj-config-{}.toml", std::process::id()));
+            let _ = fs::write(&path, "");
+            path
+        })
+        .clone()
+}
+
+pub(super) fn run_jj(repo: Option<&Path>, args: &[&str]) {
+    let mut cmd = Command::new("jj");
+    cmd.env("JJ_USER", "Herdr Test")
+        .env("JJ_EMAIL", "herdr@example.invalid")
+        .env("JJ_CONFIG", isolated_jj_config());
+    if let Some(repo) = repo {
+        cmd.arg("-R").arg(repo);
+    }
+    let output = cmd.args(args).output().unwrap();
+    assert!(
+        output.status.success(),
+        "jj {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 pub(super) fn create_committed_repo(path: &Path) {
     fs::create_dir_all(path).unwrap();
-    run_git(path, &["init", "--quiet"]);
+    run_jj(None, &["git", "init", "--colocate", path.to_str().unwrap()]);
     run_git(path, &["config", "user.email", "herdr@example.invalid"]);
     run_git(path, &["config", "user.name", "Herdr Test"]);
     fs::write(path.join("README.md"), "test\n").unwrap();
-    run_git(path, &["add", "README.md"]);
-    run_git(path, &["commit", "--quiet", "-m", "initial"]);
+    run_jj(Some(path), &["describe", "-m", "initial"]);
 }
 
 pub(super) struct SpawnedHerdr {
@@ -179,6 +210,9 @@ pub(super) fn spawn_named_server(
         .args(["--session", session, "server"])
         .env("XDG_CONFIG_HOME", config_home)
         .env("XDG_RUNTIME_DIR", runtime_dir)
+        .env("JJ_USER", "Herdr Test")
+        .env("JJ_EMAIL", "herdr@example.invalid")
+        .env("JJ_CONFIG", isolated_jj_config())
         .env_remove("HERDR_SOCKET_PATH")
         .env_remove("HERDR_CLIENT_SOCKET_PATH")
         .env_remove("HERDR_ENV")
@@ -306,6 +340,9 @@ pub(super) fn spawn_herdr_with_config(
     cmd.env("HERDR_SOCKET_PATH", socket_path);
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
     cmd.env("SHELL", "/bin/sh");
+    cmd.env("JJ_USER", "Herdr Test");
+    cmd.env("JJ_EMAIL", "herdr@example.invalid");
+    cmd.env("JJ_CONFIG", isolated_jj_config());
     cmd.env_remove("HERDR_ENV");
     if let Some(path) = path_override {
         cmd.env("PATH", path);

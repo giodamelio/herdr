@@ -1204,11 +1204,11 @@ fn worktree_remove_escalates_recoverable_failure_to_force_confirmation() {
         ("dirty_worktree_requires_force", "dirty worktree", true),
         (
             "worktree_remove_failed",
-            "fatal: '/repo-feature' is not a working tree",
-            true,
+            "/repo-feature is no longer a workspace of this repository",
+            false,
         ),
         ("worktree_remove_failed", "Permission denied", false),
-        ("server_unavailable", "is not a working tree", false),
+        ("server_unavailable", "dirty worktree", false),
     ] {
         let mut snapshot = snapshot();
         snapshot.workspaces[0].worktree = Some(ClientShellWorktree {

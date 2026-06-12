@@ -16,7 +16,7 @@ use crate::render_signal::RenderSignal;
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalRuntimeRegistry, TerminalState};
 
 mod aggregate;
-mod git;
+pub(crate) mod git;
 mod tab;
 
 use self::git::git_status_cache_key_for_space;
@@ -36,6 +36,14 @@ pub struct WorktreeSpaceMembership {
     pub repo_root: PathBuf,
     pub checkout_path: PathBuf,
     pub is_linked_worktree: bool,
+    /// jj workspace name for this checkout (the handle `jj workspace forget`
+    /// needs). The default workspace is `"default"`.
+    #[serde(default = "default_workspace_name")]
+    pub workspace_name: String,
+}
+
+fn default_workspace_name() -> String {
+    "default".to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

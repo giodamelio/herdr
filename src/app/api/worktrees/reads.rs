@@ -21,7 +21,6 @@ impl SourceInput {
     fn resolve(
         mut self,
         allow_linked: bool,
-        trust_repository: bool,
     ) -> Result<(Option<String>, WorktreeSource), ApiFailure> {
         let source = if let Some(membership) = self.membership {
             if membership.is_linked_worktree && !allow_linked {
@@ -64,7 +63,7 @@ impl SourceInput {
                 }
                 self.workspace_id = None;
             }
-            worktree_source_from_space(space, allow_linked, trust_repository)
+            worktree_source_from_space(space, allow_linked)
         };
         Ok((self.workspace_id, source))
     }
@@ -139,13 +138,11 @@ impl App {
         respond_to: std::sync::mpsc::Sender<String>,
         client_local: bool,
     ) {
-        let (workspace_id, cwd, allow_linked, trust_repository) = match &request.method {
-            Method::WorktreeList(params) => (
-                &params.workspace_id,
-                &params.cwd,
-                true,
-                params.trust_repository,
-            ),
+        // `trust_repository` stays on the request for wire compatibility. It
+        // configured git's `safe.directory`, and worktree discovery now runs
+        // through jj, which has no equivalent to set.
+        let (workspace_id, cwd, allow_linked) = match &request.method {
+            Method::WorktreeList(params) => (&params.workspace_id, &params.cwd, true),
             Method::WorktreeOpen(params) => {
                 if params.path.is_some() == params.branch.is_some() {
                     let _ = respond_to.send(encode_error(
@@ -155,12 +152,7 @@ impl App {
                     ));
                     return;
                 }
-                (
-                    &params.workspace_id,
-                    &params.cwd,
-                    false,
-                    params.trust_repository,
-                )
+                (&params.workspace_id, &params.cwd, false)
             }
             _ => unreachable!("only worktree list/open use background discovery"),
         };
@@ -188,14 +180,12 @@ impl App {
                 let source_cwd = input.cwd.clone();
                 let mut source_workspace_id = None;
                 let result = input
-                    .resolve(allow_linked, trust_repository)
+                    .resolve(allow_linked)
                     .and_then(|(workspace_id, source)| {
                         source_workspace_id = workspace_id;
-                        let mut entries = crate::worktree::list_existing_worktrees(
-                            &source.source_repo_root,
-                            trust_repository,
-                        )
-                        .map_err(|err| ApiFailure::new("worktree_list_failed", err))?;
+                        let mut entries =
+                            crate::worktree::list_existing_worktrees(&source.source_repo_root)
+                                .map_err(|err| ApiFailure::new("worktree_list_failed", err))?;
                         if let Method::WorktreeOpen(params) = &request.method {
                             entries = vec![find_worktree_entry(
                                 entries,
@@ -299,10 +289,9 @@ impl App {
 fn worktree_source_from_space(
     space: crate::workspace::GitSpaceMetadata,
     allow_linked: bool,
-    trust_repository: bool,
 ) -> WorktreeSource {
     let source_checkout_path = if allow_linked {
-        parent_checkout_path_for_space(&space, trust_repository)
+        parent_checkout_path_for_space(&space)
     } else {
         space.repo_root.clone()
     };
@@ -315,15 +304,12 @@ fn worktree_source_from_space(
     }
 }
 
-fn parent_checkout_path_for_space(
-    space: &crate::workspace::GitSpaceMetadata,
-    trust_repository: bool,
-) -> PathBuf {
+fn parent_checkout_path_for_space(space: &crate::workspace::GitSpaceMetadata) -> PathBuf {
     if !space.is_linked_worktree {
         return space.repo_root.clone();
     }
 
-    crate::worktree::list_existing_worktrees(&space.repo_root, trust_repository)
+    crate::worktree::list_existing_worktrees(&space.repo_root)
         .ok()
         .and_then(|entries| {
             entries.into_iter().find_map(|entry| {

@@ -441,6 +441,7 @@ mod tests {
             repo_root: "/repo".into(),
             checkout_path: "/repo-worktree".into(),
             is_linked_worktree: true,
+            workspace_name: "repo-worktree".into(),
         });
         app.state.workspaces.push(child);
 
@@ -459,6 +460,7 @@ mod tests {
             repo_root: "/repo".into(),
             checkout_path: "/repo-worktree".into(),
             is_linked_worktree: true,
+            workspace_name: "repo-worktree".into(),
         });
         app.state.workspaces.push(child);
 

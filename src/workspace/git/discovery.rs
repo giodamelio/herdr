@@ -22,6 +22,14 @@ pub struct GitWorktreeInfo {
 }
 
 pub fn derive_label_from_cwd(cwd: &Path) -> String {
+    // A jj workspace is the authority when there is one; the git walk stays as
+    // the fallback for plain git checkouts. The label is the repo's name (the
+    // default workspace directory), not this checkout's, so every workspace of
+    // a repo labels consistently.
+    if let Some(space) = jj_space_metadata(cwd) {
+        return space.repo_name;
+    }
+
     git_repo_root(cwd)
         .map(|repo_root| automatic_workspace_label(cwd, &repo_root))
         .unwrap_or_else(|| fallback_label_from_cwd(cwd))
@@ -58,9 +66,145 @@ pub fn git_worktree_info(cwd: &Path) -> Option<GitWorktreeInfo> {
     })
 }
 
+/// Workspace identity for `cwd`.
+///
+/// Herdr builds worktrees on jj workspaces, so a jj workspace answers first:
+/// its identity is the shared `.jj/repo` store, which every workspace of the
+/// same repo agrees on. Plain git checkouts still fall back to the git walk.
 pub fn git_space_metadata(cwd: &Path) -> Option<GitSpaceMetadata> {
+    if let Some(space) = jj_space_metadata(cwd) {
+        return Some(space);
+    }
     let info = git_worktree_info(cwd)?;
     Some(git_space_metadata_from_info(&info))
+}
+
+fn jj_space_metadata(cwd: &Path) -> Option<GitSpaceMetadata> {
+    let root = jj_workspace_root(cwd)?;
+    let store = jj_store_dir(&root)?;
+    let key = store.display().to_string();
+    let checkout_key = canonicalize_best_effort_path(&root).display().to_string();
+    let is_linked_worktree = jj_is_added_workspace(&root);
+
+    // `store` is `<default-workspace>/.jj/repo`; the repo name is the default
+    // workspace directory name.
+    let repo_name = store
+        .parent()
+        .and_then(Path::parent)
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("repo")
+        .to_string();
+
+    Some(GitSpaceMetadata {
+        key,
+        checkout_key,
+        repo_name,
+        repo_root: root,
+        is_linked_worktree,
+    })
+}
+
+/// Run a read-only jj command rooted at `dir`.
+///
+/// `--ignore-working-copy` keeps these queries side-effect free (no snapshot,
+/// safe while another process holds the working copy) and `--color=never`
+/// guards against a user `ui.color = "always"` setting leaking escape codes.
+pub(super) fn jj_read(dir: &Path, args: &[&str]) -> Option<std::process::Output> {
+    crate::noninteractive_process::command("jj")
+        .arg("--ignore-working-copy")
+        .arg("--color=never")
+        .arg("-R")
+        .arg(dir)
+        .args(args)
+        .output()
+        .ok()
+}
+
+pub(super) fn jj_read_stdout(dir: &Path, args: &[&str]) -> Option<String> {
+    let output = jj_read(dir, args)?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let stdout = stdout.trim();
+    (!stdout.is_empty()).then(|| stdout.to_string())
+}
+
+/// Walk up from `start` to the nearest ancestor that is a jj workspace root
+/// (contains a `.jj` entry).
+pub(super) fn jj_workspace_root(start: &Path) -> Option<PathBuf> {
+    let mut current = if start.is_dir() {
+        start.to_path_buf()
+    } else {
+        start.parent()?.to_path_buf()
+    };
+
+    loop {
+        if current.join(".jj").exists() {
+            return Some(current);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+/// Resolve the shared store directory (`<default-workspace>/.jj/repo`) for a
+/// workspace root.
+///
+/// In the default workspace `.jj/repo` is a directory; in an added workspace it
+/// is a file containing a path (relative to `.jj/`) to the default workspace's
+/// store.
+pub(super) fn jj_store_dir(workspace_root: &Path) -> Option<PathBuf> {
+    let repo = workspace_root.join(".jj").join("repo");
+    let meta = std::fs::symlink_metadata(&repo).ok()?;
+    if meta.is_dir() {
+        return Some(canonicalize_best_effort_path(&repo));
+    }
+
+    let target = std::fs::read_to_string(&repo).ok()?;
+    let target = target.trim();
+    if target.is_empty() {
+        return None;
+    }
+    let target_path = Path::new(target);
+    let resolved = if target_path.is_absolute() {
+        target_path.to_path_buf()
+    } else {
+        workspace_root.join(".jj").join(target_path)
+    };
+    Some(canonicalize_best_effort_path(&resolved))
+}
+
+/// True when the workspace at `workspace_root` is an added jj workspace.
+pub(super) fn jj_is_added_workspace(workspace_root: &Path) -> bool {
+    std::fs::symlink_metadata(workspace_root.join(".jj").join("repo"))
+        .map(|meta| !meta.is_dir())
+        .unwrap_or(false)
+}
+
+/// The bookmark associated with this workspace's working copy: the nearest
+/// ancestor bookmark of `@`. Returns `None` when no bookmark is reachable
+/// (analogous to a detached checkout).
+fn jj_branch(cwd: &Path) -> Option<String> {
+    let root = jj_workspace_root(cwd)?;
+    let output = jj_read_stdout(
+        &root,
+        &[
+            "log",
+            "-r",
+            "heads(::@ & bookmarks())",
+            "--no-graph",
+            "-T",
+            "local_bookmarks.map(|b| b.name()).join(\"\\n\")",
+        ],
+    )?;
+    output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
 }
 
 pub(crate) fn automatic_workspace_label(cwd: &Path, repo_root: &Path) -> String {
@@ -184,6 +328,10 @@ pub(super) fn read_git_ref_file(path: &Path) -> Option<String> {
 }
 
 pub fn git_branch(cwd: &Path) -> Option<String> {
+    if jj_workspace_root(cwd).is_some() {
+        return jj_branch(cwd);
+    }
+
     let repo_root = git_repo_root(cwd)?;
     let git_dir = git_dir_for_repo_root(&repo_root)?;
     let git_common_dir = git_common_dir_for_git_dir(&git_dir);
@@ -823,6 +971,139 @@ mod tests {
             git_rev_parse_verify(&root, "refs/heads/main").as_deref(),
             Some(head_oid.as_str())
         );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// Discovery through jj workspaces, which is how Herdr builds worktrees.
+#[cfg(test)]
+mod jj_tests {
+    use super::*;
+    use crate::workspace::git::test_support::{init_colocated_repo, jj, temp_test_dir};
+
+    #[test]
+    fn git_branch_reads_bookmark_at_working_copy() {
+        let root = temp_test_dir("branch-bookmark");
+        init_colocated_repo(&root);
+        jj(&root, &["bookmark", "create", "main", "-r", "@"]);
+
+        assert_eq!(git_branch(&root).as_deref(), Some("main"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn git_branch_returns_none_without_bookmark() {
+        let root = temp_test_dir("branch-none");
+        init_colocated_repo(&root);
+
+        assert_eq!(git_branch(&root), None);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn git_branch_reads_nearest_ancestor_bookmark_from_subdir() {
+        let root = temp_test_dir("branch-ancestor");
+        init_colocated_repo(&root);
+        jj(&root, &["bookmark", "create", "main", "-r", "@"]);
+        jj(&root, &["new"]);
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(git_branch(&nested).as_deref(), Some("main"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn git_space_metadata_ignores_empty_jj_marker() {
+        let base = temp_test_dir("invalid-jj-root");
+        let cwd = base.join("workspace");
+        // A `.jj` directory without a resolvable store must not register as a repo.
+        std::fs::create_dir_all(base.join(".jj")).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        assert_eq!(git_space_metadata(&cwd), None);
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn git_space_metadata_identifies_default_workspace() {
+        let root = temp_test_dir("space-default");
+        init_colocated_repo(&root);
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let metadata =
+            git_space_metadata(&nested).expect("default workspace should map to a space");
+        assert!(!metadata.is_linked_worktree);
+        assert_eq!(
+            canonicalize_best_effort_path(&metadata.repo_root),
+            canonicalize_best_effort_path(&root)
+        );
+        assert_eq!(
+            metadata.repo_name,
+            root.file_name().and_then(|name| name.to_str()).unwrap()
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn git_space_metadata_groups_added_workspace_with_default() {
+        let base = temp_test_dir("space-added");
+        let root = base.join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        init_colocated_repo(&root);
+        let added = base.join("added");
+        jj(
+            &root,
+            &[
+                "workspace",
+                "add",
+                "--name",
+                "added",
+                added.to_str().unwrap(),
+            ],
+        );
+
+        let default_space = git_space_metadata(&root).unwrap();
+        let added_space = git_space_metadata(&added).unwrap();
+
+        // Same repo identity (shared store), different checkouts.
+        assert_eq!(default_space.key, added_space.key);
+        assert_ne!(default_space.checkout_key, added_space.checkout_key);
+        assert!(!default_space.is_linked_worktree);
+        assert!(added_space.is_linked_worktree);
+        assert_eq!(default_space.repo_name, added_space.repo_name);
+        assert_eq!(added_space.repo_name, "repo");
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn derive_label_prefers_repo_name() {
+        let base = temp_test_dir("label-repo-base");
+        let root = base.join("named-repo");
+        std::fs::create_dir_all(&root).unwrap();
+        init_colocated_repo(&root);
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(derive_label_from_cwd(&nested), "named-repo");
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn derive_label_uses_path_name_outside_repo() {
+        let root = temp_test_dir("label-plain");
+        let label = root.file_name().and_then(|name| name.to_str()).unwrap();
+
+        assert_eq!(derive_label_from_cwd(Path::new(&root)), label);
 
         std::fs::remove_dir_all(root).unwrap();
     }
