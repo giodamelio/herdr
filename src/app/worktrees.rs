@@ -61,7 +61,7 @@ impl App {
                 })
             })
             .ok_or_else(|| {
-                "Herdr worktree actions require a workspace inside a Git work tree.".to_string()
+                "Herdr worktree actions require a workspace inside a jj repository.".to_string()
             })?;
         let source_checkout_path = existing_membership
             .as_ref()
@@ -143,6 +143,7 @@ impl App {
             workspace_id: ws.id.clone(),
             repo_root: space.repo_root,
             path: space.checkout_path,
+            workspace_name: space.workspace_name,
             error: None,
             removing: false,
             force_confirmation: false,
@@ -205,13 +206,14 @@ impl App {
                     is_linked_worktree: entry_checkout_path != repo_checkout_path,
                     path: entry.path,
                     branch: entry.branch,
+                    workspace_name: entry.workspace_name,
                     already_open_ws_idx,
                 }
             })
             .collect::<Vec<_>>();
 
         if entries.is_empty() {
-            self.state.config_diagnostic = Some("No Git worktrees found for this repo.".into());
+            self.state.config_diagnostic = Some("No jj workspaces found for this repo.".into());
             return;
         }
 
@@ -369,6 +371,7 @@ impl App {
                 ws_idx,
                 entry.path,
                 entry.is_linked_worktree,
+                entry.workspace_name,
             );
             self.state.switch_workspace(ws_idx);
             self.state.mode = Mode::Terminal;
@@ -387,6 +390,7 @@ impl App {
                     new_ws_idx,
                     entry.path,
                     entry.is_linked_worktree,
+                    entry.workspace_name,
                 );
             }
             Err(err) => {
@@ -422,6 +426,7 @@ impl App {
         target_ws_idx: usize,
         target_path: std::path::PathBuf,
         target_is_linked_worktree: bool,
+        target_workspace_name: String,
     ) {
         if let Some(source_ws_idx) = self
             .state
@@ -439,6 +444,7 @@ impl App {
                         repo_root: source_repo_root.clone(),
                         checkout_path: source_checkout_path,
                         is_linked_worktree: false,
+                        workspace_name: "default".to_string(),
                     });
             }
         }
@@ -449,6 +455,7 @@ impl App {
                 repo_root: source_repo_root,
                 checkout_path: target_path,
                 is_linked_worktree: target_is_linked_worktree,
+                workspace_name: target_workspace_name,
             });
         }
         self.state.mark_session_dirty();
@@ -502,7 +509,7 @@ impl App {
         create.creating = true;
         create.error = None;
 
-        let command = crate::worktree::build_worktree_add_new_branch_command(
+        let commands = crate::worktree::build_worktree_add_commands(
             &create.source_checkout_path,
             &create.checkout_path,
             &create.branch,
@@ -516,7 +523,7 @@ impl App {
             repo_root = %create.source_repo_root.display(),
             branch = %create.branch,
             checkout_path = %create.checkout_path.display(),
-            "starting git worktree add"
+            "starting jj workspace add"
         );
         let path = create.checkout_path.clone();
         let event_tx = self.event_tx.clone();
@@ -524,9 +531,9 @@ impl App {
             let result = if let Some(parent_dir) = parent_dir {
                 std::fs::create_dir_all(&parent_dir)
                     .map_err(|err| err.to_string())
-                    .and_then(|()| crate::worktree::run_worktree_command(&command))
+                    .and_then(|()| crate::worktree::run_worktree_commands(&commands))
             } else {
-                crate::worktree::run_worktree_command(&command)
+                crate::worktree::run_worktree_commands(&commands)
             };
             let _ = event_tx.blocking_send(AppEvent::WorktreeAddFinished(WorktreeAddResult {
                 path,
@@ -559,12 +566,13 @@ impl App {
     }
 
     pub(crate) fn start_worktree_remove(&mut self) {
-        let Some((workspace_id, repo_root, path, force)) =
+        let Some((workspace_id, repo_root, path, workspace_name)) =
             self.state.worktree_remove.as_mut().and_then(|remove| {
                 if remove.removing {
                     return None;
                 }
-                #[cfg(windows)]
+                // jj `workspace forget` always succeeds, so guard uncommitted
+                // changes with an explicit pre-check instead of a failed remove.
                 if !remove.force_confirmation
                     && crate::worktree::checkout_has_dirty_files(&remove.path).unwrap_or(false)
                 {
@@ -578,7 +586,7 @@ impl App {
                     remove.workspace_id.clone(),
                     remove.repo_root.clone(),
                     remove.path.clone(),
-                    remove.force_confirmation,
+                    remove.workspace_name.clone(),
                 ))
             })
         else {
@@ -595,11 +603,11 @@ impl App {
             self.shutdown_workspace_terminal_runtimes_for_worktree_remove(ws_idx);
         }
 
-        let command = crate::worktree::build_worktree_remove_command(&repo_root, &path, force);
-        tracing::info!(workspace_id = %workspace_id, path = %path.display(), force, "starting git worktree remove");
+        tracing::info!(workspace_id = %workspace_id, path = %path.display(), workspace_name = %workspace_name, "starting jj workspace forget");
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
-            let result = crate::worktree::run_worktree_command(&command);
+            let result =
+                crate::worktree::remove_worktree_checkout(&repo_root, &workspace_name, &path);
             let _ =
                 event_tx.blocking_send(AppEvent::WorktreeRemoveFinished(WorktreeRemoveResult {
                     workspace_id,
@@ -619,7 +627,7 @@ impl App {
 
         match result.result {
             Ok(()) => {
-                tracing::info!(checkout_path = %create.checkout_path.display(), "git worktree add completed");
+                tracing::info!(checkout_path = %create.checkout_path.display(), "jj workspace add completed");
                 let path = create.checkout_path.clone();
                 let source_workspace_id = create.source_workspace_id.clone();
                 let source_checkout_path = create.source_checkout_path.clone();
@@ -627,6 +635,8 @@ impl App {
                 let repo_key = create.repo_key.clone();
                 let repo_name = create.repo_name.clone();
                 let source_repo_root = create.source_repo_root.clone();
+                let target_workspace_name =
+                    crate::worktree::workspace_name_for_branch(&create.branch);
                 self.state.worktree_create = None;
                 self.state.name_input.clear();
                 self.state.name_input_replace_on_type = false;
@@ -639,6 +649,7 @@ impl App {
                                 repo_root: source_repo_root.clone(),
                                 checkout_path: source_checkout_path,
                                 is_linked_worktree: false,
+                                workspace_name: "default".to_string(),
                             },
                         );
                         if let Some(ws) = self
@@ -656,6 +667,7 @@ impl App {
                                 repo_root: source_repo_root,
                                 checkout_path: path,
                                 is_linked_worktree: true,
+                                workspace_name: target_workspace_name,
                             });
                         }
                         self.state.mark_session_dirty();
@@ -689,7 +701,7 @@ impl App {
 
         match result.result {
             Ok(()) => {
-                tracing::info!(workspace_id = %result.workspace_id, path = %result.path.display(), "git worktree remove completed");
+                tracing::info!(workspace_id = %result.workspace_id, path = %result.path.display(), "jj workspace forget completed");
                 self.state.worktree_remove = None;
                 if let Some(ws_idx) = self
                     .state
@@ -716,16 +728,9 @@ impl App {
                 self.render_notify.notify_one();
             }
             Err(message) => {
-                tracing::warn!(workspace_id = %result.workspace_id, path = %result.path.display(), error = %message, "git worktree remove failed");
+                tracing::warn!(workspace_id = %result.workspace_id, path = %result.path.display(), error = %message, "jj workspace forget failed");
                 remove.removing = false;
-                if !remove.force_confirmation
-                    && crate::worktree::is_dirty_worktree_remove_error(&message)
-                {
-                    remove.force_confirmation = true;
-                    remove.error = None;
-                } else {
-                    remove.error = Some(message);
-                }
+                remove.error = Some(message);
                 self.render_dirty.store(true, Ordering::Release);
                 self.render_notify.notify_one();
             }
@@ -762,31 +767,17 @@ mod tests {
         std::env::temp_dir().join(format!("herdr-{name}-{}-{nanos}", std::process::id()))
     }
 
-    fn run_git(repo: &std::path::Path, args: &[&str]) {
-        let status = std::process::Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .args(args)
-            .status()
-            .unwrap();
-        assert!(
-            status.success(),
-            "git command failed: git -C {} {}",
-            repo.display(),
-            args.join(" ")
-        );
-    }
-
     fn create_committed_repo(name: &str) -> std::path::PathBuf {
         let repo = unique_temp_path(name);
         std::fs::create_dir_all(&repo).unwrap();
-        run_git(&repo, &["init", "--quiet"]);
-        run_git(&repo, &["config", "user.email", "herdr@example.invalid"]);
-        run_git(&repo, &["config", "user.name", "Herdr Test"]);
-        std::fs::write(repo.join("README.md"), "test\n").unwrap();
-        run_git(&repo, &["add", "README.md"]);
-        run_git(&repo, &["commit", "--quiet", "-m", "initial"]);
+        crate::workspace::git::test_support::init_colocated_repo(&repo);
         repo
+    }
+
+    /// Create a jj workspace `branch` checked out at `checkout`.
+    fn add_worktree(repo: &std::path::Path, branch: &str, checkout: &std::path::Path) {
+        let commands = crate::worktree::build_worktree_add_commands(repo, checkout, branch, "HEAD");
+        crate::worktree::run_worktree_commands(&commands).unwrap();
     }
 
     fn wait_for_worktree_event(app: &mut App) -> AppEvent {
@@ -856,12 +847,14 @@ mod tests {
                     path: "/repo/herdr-main".into(),
                     branch: Some("main".into()),
                     is_linked_worktree: false,
+                    workspace_name: "default".into(),
                     already_open_ws_idx: None,
                 },
                 WorktreeOpenEntry {
                     path: "/repo/feature-linear-302".into(),
                     branch: Some("feature/linear-302".into()),
                     is_linked_worktree: true,
+                    workspace_name: "default".into(),
                     already_open_ws_idx: None,
                 },
             ],
@@ -926,6 +919,7 @@ mod tests {
                 path: "/repo/herdr-issue".into(),
                 branch: Some("worktree/issue".into()),
                 is_linked_worktree: true,
+                workspace_name: "default".into(),
                 already_open_ws_idx: Some(1),
             }],
             selected: 0,
@@ -964,18 +958,21 @@ mod tests {
                     path: "/repo/herdr".into(),
                     branch: Some("main".into()),
                     is_linked_worktree: false,
+                    workspace_name: "default".into(),
                     already_open_ws_idx: Some(0),
                 },
                 WorktreeOpenEntry {
                     path: "/repo/fd-cleanup".into(),
                     branch: Some("fd-cleanup".into()),
                     is_linked_worktree: true,
+                    workspace_name: "default".into(),
                     already_open_ws_idx: None,
                 },
                 WorktreeOpenEntry {
                     path: "/repo/bell-forward-macos-bounce".into(),
                     branch: Some("bell-forward-macos-bounce".into()),
                     is_linked_worktree: true,
+                    workspace_name: "default".into(),
                     already_open_ws_idx: None,
                 },
             ],
@@ -1020,18 +1017,7 @@ mod tests {
     fn open_existing_worktree_detects_already_open_checkout_from_subdirectory() {
         let repo = create_committed_repo("app-worktree-open-existing-repo");
         let checkout = unique_temp_path("app-worktree-open-existing-checkout");
-        run_git(
-            &repo,
-            &[
-                "worktree",
-                "add",
-                "--quiet",
-                "-b",
-                "worktree/open-existing",
-                checkout.to_str().unwrap(),
-                "HEAD",
-            ],
-        );
+        add_worktree(&repo, "worktree/open-existing", &checkout);
         let subdir = checkout.join("nested");
         std::fs::create_dir_all(&subdir).unwrap();
 
@@ -1066,6 +1052,7 @@ mod tests {
             repo_root: "/repo/herdr".into(),
             checkout_path: "/repo/herdr-issue".into(),
             is_linked_worktree: true,
+            workspace_name: "default".into(),
         });
 
         app.open_new_linked_worktree_dialog(0);
@@ -1155,58 +1142,7 @@ mod tests {
         }
         assert!(checkout.join("README.md").exists());
 
-        let remove = crate::worktree::build_worktree_remove_command(&repo, &checkout, false);
-        crate::worktree::run_worktree_command(&remove).unwrap();
         let _ = std::fs::remove_dir_all(worktree_root);
-        let _ = std::fs::remove_dir_all(repo);
-    }
-
-    #[test]
-    fn open_new_worktree_dialog_supports_standalone_bare_repo_source() {
-        let repo = create_committed_repo("app-worktree-dialog-bare-origin");
-        let bare = unique_temp_path("app-worktree-dialog-bare-repo");
-        run_git(
-            &repo,
-            &["clone", "--quiet", "--bare", ".", bare.to_str().unwrap()],
-        );
-        let worktree_root = unique_temp_path("app-worktree-dialog-bare-root");
-
-        let mut app = app_for_worktree_tests();
-        app.state.worktree_directory = worktree_root.clone();
-        app.state.workspaces = vec![crate::workspace::Workspace::test_new("source")];
-        app.state.workspaces[0].identity_cwd = bare.clone();
-
-        app.open_new_linked_worktree_dialog(0);
-
-        assert_eq!(app.state.mode, Mode::NewLinkedWorktree);
-        assert!(app.state.config_diagnostic.is_none());
-        let create = app.state.worktree_create.as_ref().unwrap();
-        assert_eq!(create.source_checkout_path, bare);
-        assert_eq!(create.source_repo_root, create.source_checkout_path);
-        let source_checkout_path = create.source_checkout_path.clone();
-
-        let branch = "worktree/from-bare-source";
-        let repo_name = create.repo_name.clone();
-        let checkout = crate::worktree::default_checkout_path(&worktree_root, &repo_name, branch);
-        app.state.name_input = branch.into();
-
-        app.start_worktree_add();
-
-        let event = wait_for_worktree_event(&mut app);
-        match event {
-            AppEvent::WorktreeAddFinished(result) => {
-                assert_eq!(result.path, checkout);
-                assert_eq!(result.result, Ok(()));
-            }
-            other => panic!("unexpected event: {other:?}"),
-        }
-        assert!(checkout.join("README.md").exists());
-
-        let remove_new =
-            crate::worktree::build_worktree_remove_command(&source_checkout_path, &checkout, false);
-        crate::worktree::run_worktree_command(&remove_new).unwrap();
-        let _ = std::fs::remove_dir_all(worktree_root);
-        let _ = std::fs::remove_dir_all(source_checkout_path);
         let _ = std::fs::remove_dir_all(repo);
     }
 
@@ -1214,21 +1150,10 @@ mod tests {
     fn start_worktree_add_uses_source_checkout_head_as_base() {
         let repo = create_committed_repo("app-worktree-add-source-repo");
         let source_checkout = unique_temp_path("app-worktree-add-source-checkout");
-        run_git(
-            &repo,
-            &[
-                "worktree",
-                "add",
-                "--quiet",
-                "-b",
-                "worktree/source-base",
-                source_checkout.to_str().unwrap(),
-                "HEAD",
-            ],
-        );
+        add_worktree(&repo, "worktree/source-base", &source_checkout);
+        // jj auto-snapshots the working copy, so the new file lands in the source
+        // workspace's `@` when `jj workspace add -r @` runs.
         std::fs::write(source_checkout.join("SOURCE.md"), "source branch\n").unwrap();
-        run_git(&source_checkout, &["add", "SOURCE.md"]);
-        run_git(&source_checkout, &["commit", "--quiet", "-m", "source"]);
 
         let worktree_root = unique_temp_path("app-worktree-add-from-source-root");
         let branch = "worktree/from-source";
@@ -1261,51 +1186,19 @@ mod tests {
         }
         assert!(checkout.join("SOURCE.md").exists());
 
-        let remove_new = crate::worktree::build_worktree_remove_command(&repo, &checkout, false);
-        crate::worktree::run_worktree_command(&remove_new).unwrap();
-        let remove_source =
-            crate::worktree::build_worktree_remove_command(&repo, &source_checkout, false);
-        crate::worktree::run_worktree_command(&remove_source).unwrap();
         let _ = std::fs::remove_dir_all(worktree_root);
         let _ = std::fs::remove_dir_all(repo);
     }
 
     #[test]
-    fn dirty_worktree_remove_failure_requests_force_confirmation() {
-        let path = std::path::PathBuf::from("/w/herdr/dirty");
-        let mut app = app_for_worktree_tests();
-        app.state.worktree_remove = Some(WorktreeRemoveState {
-            workspace_id: "ws".into(),
-            repo_root: std::path::PathBuf::from("/repo/herdr"),
-            path: path.clone(),
-            error: None,
-            removing: true,
-            force_confirmation: false,
-        });
-
-        app.handle_worktree_remove_finished(WorktreeRemoveResult {
-            workspace_id: "ws".into(),
-            path,
-            result: Err(
-                "fatal: '/w/herdr/dirty' contains modified or untracked files, use --force to delete it"
-                    .into(),
-            ),
-        });
-
-        let remove = app.state.worktree_remove.unwrap();
-        assert!(!remove.removing);
-        assert!(remove.force_confirmation);
-        assert_eq!(remove.error, None);
-    }
-
-    #[test]
-    fn non_dirty_worktree_remove_failure_keeps_error_message() {
+    fn worktree_remove_failure_keeps_error_message() {
         let path = std::path::PathBuf::from("/w/herdr/missing");
         let mut app = app_for_worktree_tests();
         app.state.worktree_remove = Some(WorktreeRemoveState {
             workspace_id: "ws".into(),
             repo_root: std::path::PathBuf::from("/repo/herdr"),
             path: path.clone(),
+            workspace_name: "worktree-missing".into(),
             error: None,
             removing: true,
             force_confirmation: false,
@@ -1314,7 +1207,7 @@ mod tests {
         app.handle_worktree_remove_finished(WorktreeRemoveResult {
             workspace_id: "ws".into(),
             path,
-            result: Err("fatal: '/w/herdr/missing' is not a working tree".into()),
+            result: Err("Error: No such workspace 'worktree-missing'".into()),
         });
 
         let remove = app.state.worktree_remove.unwrap();
@@ -1322,26 +1215,16 @@ mod tests {
         assert!(!remove.force_confirmation);
         assert_eq!(
             remove.error,
-            Some("fatal: '/w/herdr/missing' is not a working tree".into())
+            Some("Error: No such workspace 'worktree-missing'".into())
         );
     }
 
     #[test]
-    fn dirty_worktree_remove_retries_with_force_and_closes_workspace() {
+    fn dirty_worktree_remove_requires_force_then_closes_workspace() {
         let repo = create_committed_repo("app-worktree-dirty-remove-repo");
         let checkout = unique_temp_path("app-worktree-dirty-remove-checkout");
-        run_git(
-            &repo,
-            &[
-                "worktree",
-                "add",
-                "--quiet",
-                "-b",
-                "worktree/dirty-remove",
-                checkout.to_str().unwrap(),
-                "HEAD",
-            ],
-        );
+        let branch = "worktree/dirty-remove";
+        add_worktree(&repo, branch, &checkout);
         std::fs::write(checkout.join("README.md"), "dirty\n").unwrap();
 
         let mut app = app_for_worktree_tests();
@@ -1353,32 +1236,22 @@ mod tests {
             repo_root: repo.clone(),
             checkout_path: checkout.clone(),
             is_linked_worktree: true,
+            workspace_name: crate::worktree::workspace_name_for_branch(branch),
         });
         app.state.active = Some(0);
         app.state.selected = 0;
         app.open_remove_linked_worktree_confirmation(0);
 
+        // First attempt: the dirty pre-check flips on force confirmation
+        // synchronously and does not spawn the removal worker.
         app.start_worktree_remove();
-
-        #[cfg(not(windows))]
-        {
-            let safe_event = wait_for_worktree_event(&mut app);
-            match safe_event {
-                AppEvent::WorktreeRemoveFinished(result) => {
-                    assert_eq!(result.workspace_id, workspace_id);
-                    assert_eq!(result.path, checkout);
-                    assert!(result.result.is_err());
-                    app.handle_worktree_remove_finished(result);
-                }
-                other => panic!("unexpected event: {other:?}"),
-            }
-        }
-
         let remove = app.state.worktree_remove.as_ref().unwrap();
         assert!(!remove.removing);
         assert!(remove.force_confirmation);
         assert!(checkout.exists());
 
+        // Second attempt: confirmed, so the worker forgets the workspace and
+        // deletes the checkout.
         app.start_worktree_remove();
         let force_event = wait_for_worktree_event(&mut app);
         match force_event {

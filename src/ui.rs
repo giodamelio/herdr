@@ -1119,12 +1119,9 @@ mod tests {
             .expect("unix time")
             .as_nanos();
         let root = std::env::temp_dir().join(format!("herdr-ui-test-{unique}"));
-        std::fs::create_dir_all(root.join(".git")).expect("create .git dir");
-        std::fs::write(
-            root.join(".git/HEAD"),
-            format!("ref: refs/heads/{branch}\n"),
-        )
-        .expect("write HEAD");
+        std::fs::create_dir_all(&root).expect("create repo dir");
+        crate::workspace::git::test_support::init_colocated_repo(&root);
+        crate::workspace::git::test_support::jj(&root, &["bookmark", "create", branch, "-r", "@"]);
         root
     }
 

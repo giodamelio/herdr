@@ -53,14 +53,27 @@ fn run_git(repo: &Path, args: &[&str]) {
     );
 }
 
+fn run_jj(repo: Option<&Path>, args: &[&str]) {
+    let mut cmd = Command::new("jj");
+    cmd.env("JJ_USER", "Herdr Test")
+        .env("JJ_EMAIL", "herdr@example.invalid");
+    if let Some(repo) = repo {
+        cmd.arg("-R").arg(repo);
+    }
+    let output = cmd.args(args).output().unwrap();
+    assert!(
+        output.status.success(),
+        "jj {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn create_committed_repo(path: &Path) {
     fs::create_dir_all(path).unwrap();
-    run_git(path, &["init", "--quiet"]);
-    run_git(path, &["config", "user.email", "herdr@example.invalid"]);
-    run_git(path, &["config", "user.name", "Herdr Test"]);
+    run_jj(None, &["git", "init", "--colocate", path.to_str().unwrap()]);
     fs::write(path.join("README.md"), "test\n").unwrap();
-    run_git(path, &["add", "README.md"]);
-    run_git(path, &["commit", "--quiet", "-m", "initial"]);
+    run_jj(Some(path), &["describe", "-m", "initial"]);
 }
 
 struct SpawnedHerdr {
@@ -296,6 +309,10 @@ fn spawn_herdr_with_config(
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
     cmd.env("HERDR_SOCKET_PATH", socket_path);
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
+    // XDG_CONFIG_HOME is redirected to a temp dir, so jj has no user config;
+    // provide an author identity for `jj workspace add`.
+    cmd.env("JJ_USER", "Herdr Test");
+    cmd.env("JJ_EMAIL", "herdr@example.invalid");
     cmd.env("SHELL", "/bin/sh");
     cmd.env_remove("HERDR_ENV");
     if let Some(path) = path_override {
@@ -2017,18 +2034,19 @@ fn worktree_open_existing_checkout_by_path_and_branch() {
     let checkout = base.join("external-checkout");
     create_committed_repo(&repo);
     let branch = "worktree/cli-open-existing";
-    run_git(
-        &repo,
+    run_jj(
+        Some(&repo),
         &[
-            "worktree",
+            "workspace",
             "add",
-            "--quiet",
-            "-b",
-            branch,
+            "--name",
+            "worktree-cli-open-existing",
+            "-r",
+            "@",
             checkout.to_str().unwrap(),
-            "HEAD",
         ],
     );
+    run_jj(Some(&checkout), &["bookmark", "create", branch, "-r", "@"]);
 
     let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
     wait_for_socket(&socket_path, Duration::from_secs(5));

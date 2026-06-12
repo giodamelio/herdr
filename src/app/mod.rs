@@ -3561,6 +3561,7 @@ mod tests {
             repo_root: "/repo/herdr".into(),
             checkout_path: "/repo/herdr".into(),
             is_linked_worktree: false,
+            workspace_name: "default".into(),
         });
         let mut child = Workspace::test_new("api-pane-close-child");
         child.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
@@ -3569,6 +3570,7 @@ mod tests {
             repo_root: "/repo/herdr".into(),
             checkout_path: "/repo/herdr-child".into(),
             is_linked_worktree: true,
+            workspace_name: "default".into(),
         });
         app.state.workspaces = vec![parent, child];
         app.state.ensure_test_terminals();

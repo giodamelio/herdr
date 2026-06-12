@@ -2,51 +2,34 @@ use std::path::{Path, PathBuf};
 
 use crate::workspace::WorkspaceGitStatusSnapshot;
 
-use super::{
-    config::{read_branch_config, upstream_full_ref},
-    discovery::{
-        canonicalize_best_effort_path, git_branch, git_ref_storage_is_reftable,
-        git_rev_parse_verify, git_space_metadata, git_symbolic_head_full, git_worktree_info,
-        read_ref_oid, GitWorktreeInfo,
-    },
+use super::discovery::{
+    canonicalize_best_effort_path, git_branch, git_space_metadata, jj_read, jj_read_stdout,
+    jj_workspace_root,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitStatusCacheEntry {
-    pub fingerprint: GitStatusFingerprint,
+    pub fingerprint: JjStatusFingerprint,
     pub snapshot: WorkspaceGitStatusSnapshot,
 }
 
+/// Cheap identity used to decide whether cached ahead/behind counts are still
+/// valid. Recomputed counts are only needed when the working-copy commit, the
+/// bookmark, or its tracked remote target moves.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GitStatusFingerprint {
-    pub git_dir: PathBuf,
-    pub git_common_dir: PathBuf,
-    pub head: GitHeadIdentity,
-    pub upstream: Option<GitUpstreamIdentity>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GitHeadIdentity {
-    Branch {
-        full_ref: String,
-        short_name: String,
-        oid: Option<String>,
-    },
-    Detached {
-        oid: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GitUpstreamIdentity {
-    pub remote: String,
-    pub merge_ref: String,
-    pub full_ref: String,
-    pub oid: Option<String>,
+pub struct JjStatusFingerprint {
+    pub workspace_root: PathBuf,
+    pub branch: Option<String>,
+    /// Commit the local bookmark points at. Ahead/behind is measured from the
+    /// bookmark (not `@`, which is an empty commit on top of it), so the cache
+    /// must invalidate when the bookmark moves.
+    pub branch_commit: Option<String>,
+    pub remote: Option<String>,
+    pub upstream_commit: Option<String>,
 }
 
 pub fn git_status_cache_key(cwd: &Path) -> Option<PathBuf> {
-    git_worktree_info(cwd).map(|info| canonicalize_best_effort_path(&info.repo_root))
+    jj_workspace_root(cwd).map(|root| canonicalize_best_effort_path(&root))
 }
 
 pub fn git_status_snapshot_for_cwd(
@@ -54,7 +37,7 @@ pub fn git_status_snapshot_for_cwd(
     cached: Option<&GitStatusCacheEntry>,
 ) -> (WorkspaceGitStatusSnapshot, Option<GitStatusCacheEntry>) {
     let space = git_space_metadata(cwd);
-    let Some(fingerprint) = git_status_fingerprint(cwd) else {
+    let Some(root) = jj_workspace_root(cwd) else {
         return (
             WorkspaceGitStatusSnapshot {
                 branch: git_branch(cwd),
@@ -64,7 +47,9 @@ pub fn git_status_snapshot_for_cwd(
             None,
         );
     };
-    let branch = fingerprint.branch_name().map(str::to_string);
+
+    let branch = git_branch(&root);
+    let fingerprint = JjStatusFingerprint::compute(&root, branch.clone());
 
     if let Some(cached) = cached.filter(|entry| entry.fingerprint == fingerprint) {
         let snapshot = WorkspaceGitStatusSnapshot {
@@ -81,10 +66,7 @@ pub fn git_status_snapshot_for_cwd(
         );
     }
 
-    let ahead_behind = fingerprint
-        .head_oid()
-        .zip(fingerprint.upstream_oid())
-        .and_then(|(head_oid, upstream_oid)| git_ahead_behind_between(cwd, head_oid, upstream_oid));
+    let ahead_behind = fingerprint.compute_ahead_behind(&root);
     let snapshot = WorkspaceGitStatusSnapshot {
         branch,
         ahead_behind,
@@ -99,351 +81,232 @@ pub fn git_status_snapshot_for_cwd(
     )
 }
 
-pub(super) fn git_status_fingerprint(cwd: &Path) -> Option<GitStatusFingerprint> {
-    let info = git_worktree_info(cwd)?;
-    let head = read_head_identity(&info)?;
-    let upstream = match &head {
-        GitHeadIdentity::Branch { short_name, .. } => read_upstream_identity(&info, short_name),
-        GitHeadIdentity::Detached { .. } => None,
-    };
-
-    Some(GitStatusFingerprint {
-        git_dir: canonicalize_best_effort_path(&info.git_dir),
-        git_common_dir: canonicalize_best_effort_path(&info.git_common_dir),
-        head,
-        upstream,
-    })
-}
-
-impl GitStatusFingerprint {
-    fn branch_name(&self) -> Option<&str> {
-        match &self.head {
-            GitHeadIdentity::Branch { short_name, .. } => Some(short_name.as_str()),
-            GitHeadIdentity::Detached { .. } => None,
+impl JjStatusFingerprint {
+    fn compute(root: &Path, branch: Option<String>) -> Self {
+        let workspace_root = canonicalize_best_effort_path(root);
+        let branch_commit = branch
+            .as_deref()
+            .and_then(|branch| jj_local_bookmark_commit(root, branch));
+        let (remote, upstream_commit) = match branch.as_deref() {
+            Some(branch) => match jj_tracked_remote(root, branch) {
+                Some(remote) => {
+                    let target = jj_remote_target(root, branch, &remote);
+                    (Some(remote), target)
+                }
+                None => (None, None),
+            },
+            None => (None, None),
+        };
+        JjStatusFingerprint {
+            workspace_root,
+            branch,
+            branch_commit,
+            remote,
+            upstream_commit,
         }
     }
 
-    fn head_oid(&self) -> Option<&str> {
-        match &self.head {
-            GitHeadIdentity::Branch { oid, .. } => oid.as_deref(),
-            GitHeadIdentity::Detached { oid } => Some(oid.as_str()),
-        }
-    }
-
-    fn upstream_oid(&self) -> Option<&str> {
-        self.upstream
-            .as_ref()
-            .and_then(|upstream| upstream.oid.as_deref())
+    fn compute_ahead_behind(&self, root: &Path) -> Option<(usize, usize)> {
+        let branch = self.branch.as_deref()?;
+        let remote = self.remote.as_deref()?;
+        // Only meaningful when the tracked remote actually points somewhere.
+        self.upstream_commit.as_ref()?;
+        jj_ahead_behind(root, branch, remote)
     }
 }
 
-fn read_head_identity(info: &GitWorktreeInfo) -> Option<GitHeadIdentity> {
-    if git_ref_storage_is_reftable(&info.git_common_dir) {
-        return read_head_identity_from_git(info);
-    }
-
-    read_head_identity_from_files(info)
+fn jj_local_bookmark_commit(root: &Path, branch: &str) -> Option<String> {
+    jj_read_stdout(
+        root,
+        &["log", "-r", branch, "--no-graph", "-T", "commit_id"],
+    )
 }
 
-fn read_head_identity_from_git(info: &GitWorktreeInfo) -> Option<GitHeadIdentity> {
-    if let Some(full_ref) = git_symbolic_head_full(&info.repo_root) {
-        let short_name = full_ref.strip_prefix("refs/heads/")?.to_string();
-        let oid = git_rev_parse_verify(&info.repo_root, &full_ref);
-        return Some(GitHeadIdentity::Branch {
-            full_ref,
-            short_name,
-            oid,
-        });
-    }
-
-    git_rev_parse_verify(&info.repo_root, "HEAD").map(|oid| GitHeadIdentity::Detached { oid })
+/// The remote that the local bookmark tracks. Prefers `origin`; ignores the
+/// colocated `git` backing remote.
+fn jj_tracked_remote(root: &Path, branch: &str) -> Option<String> {
+    let output = jj_read_stdout(
+        root,
+        &[
+            "bookmark",
+            "list",
+            "--all-remotes",
+            branch,
+            "-T",
+            "if(remote && tracked && remote != \"git\", remote ++ \"\\n\", \"\")",
+        ],
+    )?;
+    let remotes: Vec<&str> = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    remotes
+        .iter()
+        .find(|remote| **remote == "origin")
+        .or_else(|| remotes.first())
+        .map(|remote| remote.to_string())
 }
 
-fn read_head_identity_from_files(info: &GitWorktreeInfo) -> Option<GitHeadIdentity> {
-    let head = std::fs::read_to_string(info.git_dir.join("HEAD")).ok()?;
-    let head = head.trim();
-    if let Some(full_ref) = head.strip_prefix("ref: ") {
-        let short_name = full_ref.strip_prefix("refs/heads/")?.to_string();
-        let oid = read_ref_oid(&info.git_common_dir, full_ref);
-        return Some(GitHeadIdentity::Branch {
-            full_ref: full_ref.to_string(),
-            short_name,
-            oid,
-        });
-    }
-
-    (!head.is_empty()).then(|| GitHeadIdentity::Detached {
-        oid: head.to_string(),
-    })
+fn jj_remote_target(root: &Path, branch: &str, remote: &str) -> Option<String> {
+    jj_read_stdout(
+        root,
+        &[
+            "log",
+            "-r",
+            &format!("{branch}@{remote}"),
+            "--no-graph",
+            "-T",
+            "commit_id",
+        ],
+    )
 }
 
-fn read_upstream_identity(info: &GitWorktreeInfo, branch: &str) -> Option<GitUpstreamIdentity> {
-    let config = read_branch_config(info, branch)?;
-    let full_ref = upstream_full_ref(&config)?;
-    let oid = if git_ref_storage_is_reftable(&info.git_common_dir) {
-        git_rev_parse_verify(&info.repo_root, &full_ref)
-    } else {
-        read_ref_oid(&info.git_common_dir, &full_ref)
-    };
-    Some(GitUpstreamIdentity {
-        remote: config.remote,
-        merge_ref: config.merge_ref,
-        full_ref,
-        oid,
-    })
+fn jj_ahead_behind(root: &Path, branch: &str, remote: &str) -> Option<(usize, usize)> {
+    // Measure the local bookmark against its remote (not `@`, which is an empty
+    // working-copy commit on top of the bookmark and would always read +1).
+    let remote_ref = format!("{branch}@{remote}");
+    let ahead = jj_count_revset(root, &format!("{remote_ref}..{branch}"))?;
+    let behind = jj_count_revset(root, &format!("{branch}..{remote_ref}"))?;
+    Some((ahead, behind))
+}
+
+fn jj_count_revset(root: &Path, revset: &str) -> Option<usize> {
+    let output = jj_read(root, &["log", "-r", revset, "--no-graph", "-T", "\"x\\n\""])?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    Some(
+        stdout
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count(),
+    )
 }
 
 #[cfg(test)]
 pub(crate) fn git_ahead_behind(cwd: &Path) -> Option<(usize, usize)> {
-    super::discovery::git_repo_root(cwd)?;
-
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    parse_git_ahead_behind_output(&stdout)
-}
-
-fn git_ahead_behind_between(
-    cwd: &Path,
-    head_oid: &str,
-    upstream_oid: &str,
-) -> Option<(usize, usize)> {
-    let range = format!("{head_oid}...{upstream_oid}");
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(["rev-list", "--left-right", "--count", &range])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    parse_git_ahead_behind_output(&stdout)
-}
-
-fn parse_git_ahead_behind_output(stdout: &str) -> Option<(usize, usize)> {
-    let mut parts = stdout.split_whitespace();
-    let ahead = parts.next()?.parse().ok()?;
-    let behind = parts.next()?.parse().ok()?;
-    Some((ahead, behind))
+    let root = jj_workspace_root(cwd)?;
+    let branch = git_branch(&root)?;
+    let remote = jj_tracked_remote(&root, &branch)?;
+    jj_ahead_behind(&root, &branch, &remote)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::git::test_support::{run_git, temp_test_dir, write_fake_tracked_repo};
+    use crate::workspace::git::test_support::{
+        ensure_jj_identity, init_colocated_repo, jj, temp_test_dir,
+    };
+    use std::process::Command;
 
-    #[test]
-    fn git_status_cache_key_ignores_invalid_git_marker() {
-        let base = temp_test_dir("invalid-git-root");
-        let cwd = base.join("workspace");
-        std::fs::create_dir_all(base.join(".git")).unwrap();
-        std::fs::create_dir_all(&cwd).unwrap();
-
-        assert_eq!(git_status_cache_key(&cwd), None);
-
-        std::fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
-    fn git_status_reuses_cached_ahead_behind_when_fingerprint_matches() {
-        let root = temp_test_dir("cache-hit");
-        write_fake_tracked_repo(&root);
-        let fingerprint = git_status_fingerprint(&root).unwrap();
-        let cached = GitStatusCacheEntry {
-            fingerprint,
-            snapshot: WorkspaceGitStatusSnapshot {
-                branch: Some("main".into()),
-                ahead_behind: Some((2, 1)),
-                space: git_space_metadata(&root),
-            },
-        };
-
-        let (snapshot, update) = git_status_snapshot_for_cwd(&root, Some(&cached));
-
-        assert_eq!(snapshot.branch.as_deref(), Some("main"));
-        assert_eq!(snapshot.ahead_behind, Some((2, 1)));
-        assert_eq!(update.unwrap().snapshot.ahead_behind, Some((2, 1)));
-
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn git_status_does_not_reuse_cache_when_branch_changes_at_same_oid() {
-        let root = temp_test_dir("branch-switch");
-        write_fake_tracked_repo(&root);
-        let fingerprint = git_status_fingerprint(&root).unwrap();
-        let cached = GitStatusCacheEntry {
-            fingerprint,
-            snapshot: WorkspaceGitStatusSnapshot {
-                branch: Some("main".into()),
-                ahead_behind: Some((4, 0)),
-                space: git_space_metadata(&root),
-            },
-        };
-        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/feature\n").unwrap();
-        std::fs::write(
-            root.join(".git/refs/heads/feature"),
-            "1111111111111111111111111111111111111111\n",
-        )
-        .unwrap();
-        std::fs::write(
-            root.join(".git/config"),
-            "[branch \"feature\"]\n\tremote = origin\n\tmerge = refs/heads/main\n",
-        )
-        .unwrap();
-
-        let (snapshot, _) = git_status_snapshot_for_cwd(&root, Some(&cached));
-
-        assert_eq!(snapshot.branch.as_deref(), Some("feature"));
-        assert_eq!(snapshot.ahead_behind, None);
-
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn git_status_clears_ahead_behind_when_upstream_is_unset() {
-        let root = temp_test_dir("upstream-unset");
-        write_fake_tracked_repo(&root);
-        let fingerprint = git_status_fingerprint(&root).unwrap();
-        let cached = GitStatusCacheEntry {
-            fingerprint,
-            snapshot: WorkspaceGitStatusSnapshot {
-                branch: Some("main".into()),
-                ahead_behind: Some((0, 3)),
-                space: git_space_metadata(&root),
-            },
-        };
-        std::fs::write(root.join(".git/config"), "").unwrap();
-
-        let (snapshot, _) = git_status_snapshot_for_cwd(&root, Some(&cached));
-
-        assert_eq!(snapshot.branch.as_deref(), Some("main"));
-        assert_eq!(snapshot.ahead_behind, None);
-
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn git_status_fingerprint_reads_packed_refs() {
-        let root = temp_test_dir("packed-refs");
-        write_fake_tracked_repo(&root);
-        std::fs::remove_file(root.join(".git/refs/remotes/origin/main")).unwrap();
-        std::fs::write(
-            root.join(".git/packed-refs"),
-            "# pack-refs with: peeled fully-peeled sorted\n2222222222222222222222222222222222222222 refs/remotes/origin/main\n",
-        )
-        .unwrap();
-
-        let fingerprint = git_status_fingerprint(&root).unwrap();
-
-        assert_eq!(
-            fingerprint.upstream.unwrap().oid.as_deref(),
-            Some("2222222222222222222222222222222222222222")
-        );
-
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn git_status_cache_key_is_per_linked_worktree_checkout() {
-        let base = temp_test_dir("linked-worktree-keys");
-        let common_dir = base.join("repo/.git");
-        let worktree_one = base.join("one");
-        let worktree_two = base.join("two");
-        let git_dir_one = common_dir.join("worktrees/one");
-        let git_dir_two = common_dir.join("worktrees/two");
-        std::fs::create_dir_all(&git_dir_one).unwrap();
-        std::fs::create_dir_all(&git_dir_two).unwrap();
-        std::fs::create_dir_all(&worktree_one).unwrap();
-        std::fs::create_dir_all(&worktree_two).unwrap();
-        std::fs::write(
-            worktree_one.join(".git"),
-            format!("gitdir: {}\n", git_dir_one.display()),
-        )
-        .unwrap();
-        std::fs::write(
-            worktree_two.join(".git"),
-            format!("gitdir: {}\n", git_dir_two.display()),
-        )
-        .unwrap();
-        std::fs::write(git_dir_one.join("HEAD"), "ref: refs/heads/one\n").unwrap();
-        std::fs::write(git_dir_two.join("HEAD"), "ref: refs/heads/two\n").unwrap();
-
-        assert_ne!(
-            git_status_cache_key(&worktree_one),
-            git_status_cache_key(&worktree_two)
-        );
-
-        std::fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
-    fn git_status_fingerprint_reads_reftable_branch_identity() {
-        let root = temp_test_dir("reftable-fingerprint");
-        let root_arg = root.to_string_lossy().to_string();
-        let output = std::process::Command::new("git")
-            .args(["init", "--ref-format=reftable", "-b", "main", &root_arg])
+    /// Clone `src` into `dest` as a colocated repo and put `@` on a local `main`
+    /// bookmark that tracks `origin` (mirrors a normal branch-tracks-remote
+    /// checkout; the bare colocated source has no default HEAD for clone to
+    /// auto-track).
+    fn clone_tracking_main(src: &Path, dest: &Path) {
+        ensure_jj_identity();
+        let output = Command::new("jj")
+            .args(["git", "clone", "--colocate"])
+            .arg(src)
+            .arg(dest)
             .output()
-            .unwrap();
-        if !output.status.success() {
-            std::fs::remove_dir_all(root).unwrap();
-            return;
-        }
-        run_git(&root, &["config", "user.email", "herdr@example.invalid"]);
-        run_git(&root, &["config", "user.name", "Herdr Test"]);
-        run_git(&root, &["commit", "--allow-empty", "-m", "initial"]);
-
-        let fingerprint = git_status_fingerprint(&root).unwrap();
-
-        assert_eq!(
-            fingerprint.head,
-            GitHeadIdentity::Branch {
-                full_ref: "refs/heads/main".into(),
-                short_name: "main".into(),
-                oid: git_rev_parse_verify(&root, "HEAD"),
-            }
+            .expect("failed to spawn jj");
+        assert!(
+            output.status.success(),
+            "jj git clone failed: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
+        jj(dest, &["bookmark", "track", "main", "--remote", "origin"]);
+        jj(dest, &["new", "main"]);
+    }
+
+    #[test]
+    fn cache_key_is_per_workspace_checkout() {
+        let base = temp_test_dir("cache-key-per-ws");
+        let root = base.join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        init_colocated_repo(&root);
+        let added = base.join("added");
+        jj(
+            &root,
+            &[
+                "workspace",
+                "add",
+                "--name",
+                "added",
+                added.to_str().unwrap(),
+            ],
+        );
+
+        assert_ne!(git_status_cache_key(&root), git_status_cache_key(&added));
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn snapshot_reports_bookmark_without_remote() {
+        let root = temp_test_dir("snapshot-branch");
+        init_colocated_repo(&root);
+        jj(&root, &["bookmark", "create", "main", "-r", "@"]);
+
+        let (snapshot, entry) = git_status_snapshot_for_cwd(&root, None);
+        assert_eq!(snapshot.branch.as_deref(), Some("main"));
+        assert_eq!(snapshot.ahead_behind, None);
+        assert!(entry.is_some());
 
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn git_status_recomputes_ahead_behind_when_head_moves() {
-        let base = temp_test_dir("head-moves");
-        let remote = base.join("remote.git");
-        let repo = base.join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        let remote_arg = remote.to_string_lossy().to_string();
-        run_git(&base, &["init", "--bare", &remote_arg]);
-        run_git(&repo, &["init"]);
-        run_git(&repo, &["config", "user.email", "herdr@example.invalid"]);
-        run_git(&repo, &["config", "user.name", "Herdr Test"]);
-        run_git(&repo, &["commit", "--allow-empty", "-m", "initial"]);
-        run_git(&repo, &["branch", "-M", "main"]);
-        run_git(&repo, &["remote", "add", "origin", &remote_arg]);
-        run_git(&repo, &["push", "-u", "origin", "main"]);
+    fn ahead_behind_tracks_remote_and_recomputes_when_head_moves() {
+        let base = temp_test_dir("ahead-behind");
+        let src = base.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        init_colocated_repo(&src);
+        jj(&src, &["bookmark", "create", "main", "-r", "@"]);
+        let clone = base.join("clone");
+        clone_tracking_main(&src, &clone);
 
-        let (initial, cache_entry) = git_status_snapshot_for_cwd(&repo, None);
+        let (initial, cache_entry) = git_status_snapshot_for_cwd(&clone, None);
+        assert_eq!(initial.branch.as_deref(), Some("main"));
         assert_eq!(initial.ahead_behind, Some((0, 0)));
-        run_git(&repo, &["commit", "--allow-empty", "-m", "ahead"]);
 
-        let (updated, _) = git_status_snapshot_for_cwd(&repo, cache_entry.as_ref());
+        // Advance the local bookmark one commit ahead of origin.
+        jj(&clone, &["new", "main"]);
+        std::fs::write(clone.join("change.txt"), "x\n").unwrap();
+        jj(&clone, &["describe", "-m", "ahead"]);
+        jj(
+            &clone,
+            &["bookmark", "set", "main", "-r", "@", "--allow-backwards"],
+        );
 
+        let (updated, _) = git_status_snapshot_for_cwd(&clone, cache_entry.as_ref());
         assert_eq!(updated.branch.as_deref(), Some("main"));
         assert_eq!(updated.ahead_behind, Some((1, 0)));
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn cache_reused_when_fingerprint_matches() {
+        let base = temp_test_dir("cache-reuse");
+        let src = base.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        init_colocated_repo(&src);
+        jj(&src, &["bookmark", "create", "main", "-r", "@"]);
+        let clone = base.join("clone");
+        clone_tracking_main(&src, &clone);
+
+        let (_, entry) = git_status_snapshot_for_cwd(&clone, None);
+        let entry = entry.unwrap();
+        // Inject a sentinel so we can tell a reused snapshot from a recomputed one.
+        let mut cached = entry.clone();
+        cached.snapshot.ahead_behind = Some((7, 7));
+
+        let (snapshot, _) = git_status_snapshot_for_cwd(&clone, Some(&cached));
+        assert_eq!(snapshot.ahead_behind, Some((7, 7)));
 
         std::fs::remove_dir_all(base).unwrap();
     }
