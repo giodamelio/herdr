@@ -7380,6 +7380,7 @@ fn completion_guard_api_session_replacement_does_not_notify_finished() {
                     agent_session_id: None,
                     agent_session_path: Some(new_session.clone()),
                     session_start_source: Some(reason.into()),
+                    status: None,
                 }),
             );
             let mut report = PaneReportAgentParams {
