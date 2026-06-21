@@ -18,6 +18,7 @@ use super::plugins::{
 use super::server::ServerCapabilities;
 use super::session::SessionSnapshot;
 use super::tabs::TabInfo;
+use super::web::WebSessionInfo;
 use super::workspaces::WorkspaceInfo;
 use super::worktrees::{WorktreeInfo, WorktreeSourceInfo};
 
@@ -303,6 +304,22 @@ pub enum ResponseResult {
     ClientShellSurfaceSet {
         active: bool,
         projection_revision: u64,
+    },
+    WebConnect {
+        /// Link that logs a browser in and redirects it to the client.
+        url: String,
+        /// Address the listener is bound to.
+        bind: String,
+        /// Seconds the link stays valid.
+        expires_in_secs: u64,
+    },
+    WebSessionList {
+        sessions: Vec<WebSessionInfo>,
+    },
+    WebDisconnected {
+        session: String,
+        /// Live connections that were closed as part of the revocation.
+        closed_connections: u32,
     },
     Ok {},
 }

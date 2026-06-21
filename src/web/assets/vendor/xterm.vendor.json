@@ -1,0 +1,26 @@
+{
+  "packages": [
+    {
+      "name": "@xterm/xterm",
+      "version": "5.5.0",
+      "license": "MIT",
+      "license_file": "LICENSE.xterm",
+      "source": "https://registry.npmjs.org/@xterm/xterm/-/xterm-5.5.0.tgz",
+      "files": {
+        "lib/xterm.js": "xterm.js",
+        "css/xterm.css": "xterm.css"
+      }
+    },
+    {
+      "name": "@xterm/addon-fit",
+      "version": "0.10.0",
+      "license": "MIT",
+      "license_file": "LICENSE.xterm",
+      "source": "https://registry.npmjs.org/@xterm/addon-fit/-/addon-fit-0.10.0.tgz",
+      "files": {
+        "lib/addon-fit.js": "xterm-addon-fit.js"
+      }
+    }
+  ],
+  "note": "Copied verbatim from the published npm tarballs, unmodified. Vendored rather than loaded from a CDN so the browser client works offline and on airgapped hosts."
+}

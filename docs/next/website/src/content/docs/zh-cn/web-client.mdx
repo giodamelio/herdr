@@ -1,0 +1,129 @@
+---
+title: 浏览器客户端
+description: 通过一次性链接把 Herdr 的 TUI 提供给浏览器，并管理由此创建的会话。
+---
+
+Herdr 可以把终端 UI 提供给浏览器。服务端本来就会为网络客户端生成增量的终端输出，
+因此浏览器只需运行一个终端模拟器：面板、快捷键和智能体都与本地完全一致。
+
+该功能默认关闭，在你启用之前一直保持关闭。
+
+## 启用浏览器客户端
+
+在配置中添加 `[web]` 段，然后重启或重新加载服务端。
+
+```toml
+[web]
+enabled = true
+```
+
+接着重新加载：
+
+```bash
+herdr server reload-config
+```
+
+## 打开会话
+
+获取一个链接：
+
+```bash
+herdr web connect
+```
+
+该链接只能使用一次，五分钟后失效。打开它会设置会话 Cookie 并重定向到客户端，
+因此令牌既不会传给页面，也不会留在地址栏里。
+
+Cookie 在刷新和关闭标签页后依然有效。它会在浏览器退出、你撤销会话或 Herdr
+服务端停止时失效。出现这些情况时，重新运行 `herdr web connect` 获取新链接。
+
+每次调用都会签发新链接，多个浏览器可以同时持有会话。Herdr 把它们视为彼此独立的
+客户端，所以笔记本和手机可以一起查看同一个会话。
+
+## 从其他机器访问
+
+默认绑定到回环地址上由内核分配的端口，只能从运行 Herdr 的机器访问。这是刻意的设计：
+监听器使用明文 HTTP，TLS 终止交由其他组件负责。
+
+用 `tailscale serve` 把它放到带证书的真实主机名后面：
+
+```bash
+tailscale serve --bg 7777
+```
+
+固定端口并告诉 Herdr 实际的访问 origin，这样打印出来的链接才是你真正能打开的那个：
+
+```toml
+[web]
+enabled = true
+bind = "127.0.0.1:7777"
+public_url = "https://box.tail1234.ts.net"
+```
+
+SSH 隧道同样可行：
+
+```bash
+ssh -L 7777:127.0.0.1:7777 you@your-host
+```
+
+你也可以只为单个链接覆盖 origin：
+
+```bash
+herdr web connect --url https://box.tail1234.ts.net
+```
+
+HTTPS 与其说是可选，不如说基本是必需的。只有在 https origin 下会话 Cookie 才会被
+标记为 `Secure`，而且浏览器不允许非安全上下文中的页面写入剪贴板，因此在明文 HTTP 下
+从面板复制内容会失效。
+
+## 管理会话
+
+列出当前持有有效 Cookie 的浏览器会话：
+
+```bash
+herdr web sessions
+```
+
+```text
+SESSION        CONNECTIONS  LAST SEEN
+9f2c41ab77de   1            3s ago
+```
+
+`CONNECTIONS` 表示此刻已连接的浏览器数量。连接数为 0 的会话仍然持有 Cookie，可以重新连接。
+
+按句柄撤销会话。Cookie 随即失效，任何活动连接会被立即关闭：
+
+```bash
+herdr web disconnect 9f2c41ab77de
+```
+
+## 配置项
+
+```toml
+[web]
+# 是否把 TUI 提供给浏览器。默认值：false
+enabled = false
+# 监听器绑定的地址。默认值：回环地址加内核分配的端口
+bind = "127.0.0.1:0"
+# 位于监听器前面的 origin。留空则使用 http://<bind>
+public_url = ""
+# 在服务端启动时绑定，而不是等到第一次 connect。默认值：false
+autostart = false
+# 连接链接的有效时长。默认值：300
+invite_ttl_secs = 300
+```
+
+`enabled` 和 `public_url` 在执行 `herdr server reload-config` 后生效。把 `enabled`
+改回 false 并重新加载会停止监听器，并一并结束所有浏览器会话。修改 `bind`
+需要重启服务端，因为只要该功能处于开启状态，监听器就会保持绑定。
+
+## 已知限制
+
+Kitty 图形无法渲染。浏览器不上报单元格像素尺寸，这会让服务端把图像字节排除在数据流之外。
+向智能体粘贴图片仍然可用，失去的只是内联预览。
+
+浏览器会为自身保留部分组合键。`ctrl+w`、`ctrl+t` 和 `ctrl+n` 由浏览器处理，不会传到面板。
+Herdr 自身的快捷键基于前缀键，不受影响。
+
+会话无法跨越实时交接保留。`herdr server live-handoff` 会替换持有令牌的进程，
+因此已连接的浏览器会显示会话已结束，你需要签发新的链接。

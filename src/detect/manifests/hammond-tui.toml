@@ -1,0 +1,15 @@
+id = "hammond-tui"
+version = "2026.06.20.1"
+min_engine_version = 1
+updated_at = "2026-06-20T00:00:00Z"
+aliases = ["herdr:hammond-tui"]
+
+# Process name "hammond-tui" identifies this agent; state falls back to idle
+# when no rule matches. This rule catches ratatui spinner-style activity.
+[[rules]]
+id = "spinner_working"
+state = "working"
+priority = 100
+region = "whole_recent"
+visible_working = true
+line_regex = ['^[\x{2800}-\x{28FF}]']

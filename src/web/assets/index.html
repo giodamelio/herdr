@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <title>herdr</title>
+    <!-- Declares "no favicon" so the browser does not request one and log a 404. -->
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/assets/xterm.css" />
+    <link rel="stylesheet" href="/assets/app.css" />
+  </head>
+  <body>
+    <div id="terminal"></div>
+    <div id="status" class="status" hidden>
+      <span id="status-text"></span>
+      <code id="status-hint" hidden></code>
+    </div>
+    <script src="/assets/xterm.js"></script>
+    <script src="/assets/xterm-addon-fit.js"></script>
+    <script src="/assets/app.js"></script>
+  </body>
+</html>

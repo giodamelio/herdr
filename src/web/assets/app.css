@@ -1,0 +1,75 @@
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #101014;
+  color: #e6e6e6;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+#terminal {
+  position: absolute;
+  inset: 0;
+  padding: 6px;
+  box-sizing: border-box;
+}
+
+#terminal .xterm {
+  height: 100%;
+}
+
+/* While Herdr owns the mouse it paints its own selection into the frame and
+   copies through OSC 52. The browser's native selection and xterm's overlay
+   would both draw a second highlight over the raw grid — spanning the sidebar
+   and other chrome Herdr never selects — so neither may run here. */
+/* The server sends only the visible screen; Herdr owns scrollback itself, so
+   xterm's viewport scrollbar would never have anything to scroll. */
+#terminal .xterm-viewport {
+  scrollbar-width: none;
+}
+
+#terminal .xterm-viewport::-webkit-scrollbar {
+  display: none;
+}
+
+/* `display: flex` below would otherwise beat the UA rule for [hidden], leaving
+   an empty pill floating over the terminal. */
+.status[hidden] {
+  display: none;
+}
+
+.status {
+  position: fixed;
+  left: 50%;
+  bottom: max(1.25rem, env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+  max-width: min(90vw, 32rem);
+  padding: 0.7rem 1.1rem;
+  border-radius: 0.6rem;
+  border: 1px solid #33333d;
+  background: #1c1c22;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+.status[data-state="reconnecting"] {
+  border-color: #6b5a1f;
+}
+
+.status[data-state="closed"] {
+  border-color: #7a2f2f;
+}
+
+.status code {
+  padding: 0.2rem 0.45rem;
+  border-radius: 0.3rem;
+  background: #26262e;
+  font-size: 0.85rem;
+}

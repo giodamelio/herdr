@@ -1,0 +1,142 @@
+---
+title: Browser client
+description: Serve the Herdr TUI to a browser over a single-use link, and manage the sessions it creates.
+---
+
+Herdr can serve its terminal UI to a browser. The server already renders diffed
+terminal output for network clients, so the browser runs a terminal emulator and
+nothing else: the same panes, the same keybindings, the same agents.
+
+This is off by default and stays off until you enable it.
+
+## Enable the browser client
+
+Add a `[web]` section to your config and restart or reload the server.
+
+```toml
+[web]
+enabled = true
+```
+
+Then reload:
+
+```bash
+herdr server reload-config
+```
+
+## Open a session
+
+Ask for a link:
+
+```bash
+herdr web connect
+```
+
+The link works once and expires after five minutes. Opening it sets a session
+cookie and redirects to the client, so the token never reaches the page and
+never stays in the address bar.
+
+The cookie survives a reload and a tab close. It dies when the browser quits,
+when you revoke the session, or when the Herdr server stops. Run
+`herdr web connect` again for a new link whenever that happens.
+
+Every call issues a fresh link, and several browsers may hold sessions at once.
+Herdr treats each one as an independent client, so a laptop and a phone can
+watch the same session together.
+
+## Reach it from another machine
+
+The default binds to loopback on a kernel-assigned port, which is only reachable
+from the machine running Herdr. That is deliberate: the listener speaks plain
+HTTP and expects something else to terminate TLS.
+
+Use `tailscale serve` to put it behind a real hostname with a certificate:
+
+```bash
+tailscale serve --bg 7777
+```
+
+Pin the port and tell Herdr the origin it is reached at, so the printed link is
+the one you can actually open:
+
+```toml
+[web]
+enabled = true
+bind = "127.0.0.1:7777"
+public_url = "https://box.tail1234.ts.net"
+```
+
+An SSH tunnel works too:
+
+```bash
+ssh -L 7777:127.0.0.1:7777 you@your-host
+```
+
+You can also override the origin for a single link:
+
+```bash
+herdr web connect --url https://box.tail1234.ts.net
+```
+
+HTTPS is close to required rather than optional. Session cookies are only marked
+`Secure` over an https origin, and browsers refuse to let a page write to the
+clipboard outside a secure context, so copying out of a pane stops working over
+plain HTTP.
+
+## Manage sessions
+
+List the browser sessions that currently hold a valid cookie:
+
+```bash
+herdr web sessions
+```
+
+```text
+SESSION        CONNECTIONS  LAST SEEN
+9f2c41ab77de   1            3s ago
+```
+
+`CONNECTIONS` counts browsers attached right now. A session with zero
+connections still holds a cookie and can reattach.
+
+Revoke one by its handle. This drops the cookie and closes any live connections
+immediately:
+
+```bash
+herdr web disconnect 9f2c41ab77de
+```
+
+## Settings
+
+```toml
+[web]
+# Serve the TUI to a browser at all. Default: false.
+enabled = false
+# Address the listener binds to. Default: loopback, kernel-assigned port.
+bind = "127.0.0.1:0"
+# Origin that fronts the listener. Empty derives http://<bind>.
+public_url = ""
+# Bind at server startup rather than on the first connect. Default: false.
+autostart = false
+# How long a connect link stays valid. Default: 300.
+invite_ttl_secs = 300
+```
+
+`enabled` and `public_url` take effect on `herdr server reload-config`. Setting
+`enabled` back to false and reloading stops the listener and ends every browser
+session with it. Changing `bind` needs a server restart, because the listener
+stays bound for as long as the feature is on.
+
+## Known limits
+
+Kitty graphics do not render. The browser reports no cell pixel size, which
+tells the server to keep image bytes out of the stream. Pasting an image to an
+agent still works; only the inline preview is lost.
+
+Browsers reserve some key combinations for themselves. `ctrl+w`, `ctrl+t`, and
+`ctrl+n` are handled by the browser and never reach a pane. Herdr's own
+keybindings are prefix-based and unaffected.
+
+Sessions do not survive a live handoff. `herdr server live-handoff` replaces the
+process holding the tokens, so connected browsers show that the session ended
+and you issue a new link.

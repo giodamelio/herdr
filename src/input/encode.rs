@@ -997,6 +997,94 @@ mod tests {
     }
 
     #[test]
+    fn wezterm_ctrl_chord_associated_text_does_not_leak_bare_character() {
+        for (sequence, kitty, legacy) in [
+            (
+                "\x1b[114;5;114u",
+                b"\x1b[114;5u".as_slice(),
+                b"\x12".as_slice(),
+            ),
+            (
+                "\x1b[99;5;99u",
+                b"\x1b[99;5u".as_slice(),
+                b"\x03".as_slice(),
+            ),
+            (
+                "\x1b[114;5;18u",
+                b"\x1b[114;5u".as_slice(),
+                b"\x12".as_slice(),
+            ),
+            ("\x1b[99;5;3u", b"\x1b[99;5u".as_slice(), b"\x03".as_slice()),
+        ] {
+            let key = parse_terminal_key_sequence(sequence).expect("wezterm chord should parse");
+            assert_eq!(
+                encode_terminal_key(key.clone(), KeyboardProtocol::Kitty { flags: 13 }),
+                kitty,
+                "{sequence:?}"
+            );
+            assert_eq!(
+                encode_terminal_key(key, KeyboardProtocol::Legacy),
+                legacy,
+                "{sequence:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn command_chords_with_redundant_associated_text_encode_as_chords() {
+        for (sequence, kitty, legacy) in [
+            (
+                "\x1b[120;3;120u",
+                b"\x1b[120;3u".as_slice(),
+                b"\x1bx".as_slice(),
+            ),
+            (
+                "\x1b[114;6;82u",
+                b"\x1b[114;6u".as_slice(),
+                b"\x12".as_slice(),
+            ),
+        ] {
+            let key = parse_terminal_key_sequence(sequence).expect("chord should parse");
+            assert_eq!(
+                encode_terminal_key(key.clone(), KeyboardProtocol::Kitty { flags: 13 }),
+                kitty,
+                "{sequence:?}"
+            );
+            assert_eq!(
+                encode_terminal_key(key, KeyboardProtocol::Legacy),
+                legacy,
+                "{sequence:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn alt_composed_associated_text_is_forwarded_as_text() {
+        let key = parse_terminal_key_sequence("\x1b[97;3;229u").expect("composed key should parse");
+        assert_eq!(
+            encode_terminal_key(key.clone(), KeyboardProtocol::Legacy),
+            "å".as_bytes()
+        );
+        assert_eq!(
+            encode_terminal_key(key, KeyboardProtocol::Kitty { flags: 1 }),
+            "å".as_bytes()
+        );
+    }
+
+    #[test]
+    fn shift_only_associated_text_is_forwarded_as_text() {
+        let key = parse_terminal_key_sequence("\x1b[97;2;65u").expect("shifted key should parse");
+        assert_eq!(
+            encode_terminal_key(key.clone(), KeyboardProtocol::Legacy),
+            b"A"
+        );
+        assert_eq!(
+            encode_terminal_key(key, KeyboardProtocol::Kitty { flags: 1 }),
+            b"A"
+        );
+    }
+
+    #[test]
     fn kitty_printable_release_is_encoded_without_report_all() {
         let release = KeyEvent::new_with_kind(
             KeyCode::Char('j'),

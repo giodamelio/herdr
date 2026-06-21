@@ -46,7 +46,8 @@ pub(super) fn command() -> Command {
         .subcommand(terminal_command())
         .subcommand(session_command())
         .subcommand(integration_command())
-        .subcommand(plugin_command());
+        .subcommand(plugin_command())
+        .subcommand(web_command());
     configure_help(command, 0)
 }
 
@@ -768,6 +769,37 @@ fn integration_command() -> Command {
             Command::new("status")
                 .about("Show integration status")
                 .arg(flag("outdated-only")),
+        )
+}
+
+fn web_command() -> Command {
+    Command::new("web")
+        .about("Open this herdr session in a browser client")
+        .subcommand(
+            Command::new("connect")
+                .about("Print a single-use link that logs a browser in")
+                .arg(
+                    Arg::new("url")
+                        .long("url")
+                        .value_name("ORIGIN")
+                        .help("Externally reachable origin that fronts the listener"),
+                )
+                .arg(json_flag()),
+        )
+        .subcommand(
+            Command::new("sessions")
+                .about("List browser sessions")
+                .arg(json_flag()),
+        )
+        .subcommand(
+            Command::new("disconnect")
+                .about("Revoke a browser session and close its connections")
+                .arg(
+                    Arg::new("session")
+                        .value_name("SESSION")
+                        .required(true)
+                        .help("Session handle reported by `herdr web sessions`"),
+                ),
         )
 }
 
