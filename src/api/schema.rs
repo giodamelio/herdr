@@ -11,6 +11,7 @@ pub mod response;
 pub mod server;
 pub mod session;
 pub mod tabs;
+pub mod web;
 pub mod workspaces;
 pub mod worktrees;
 
@@ -25,6 +26,7 @@ pub use response::*;
 pub use server::*;
 pub use session::*;
 pub use tabs::*;
+pub use web::*;
 pub use workspaces::*;
 pub use worktrees::*;
 
@@ -270,6 +272,12 @@ pub enum Method {
     PluginPaneFocus(PluginPaneFocusParams),
     #[serde(rename = "plugin.pane.close")]
     PluginPaneClose(PluginPaneCloseParams),
+    #[serde(rename = "web.connect")]
+    WebConnect(WebConnectParams),
+    #[serde(rename = "web.sessions")]
+    WebSessions(EmptyParams),
+    #[serde(rename = "web.disconnect")]
+    WebDisconnect(WebDisconnectParams),
 }
 
 #[cfg(test)]

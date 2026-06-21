@@ -3072,6 +3072,12 @@
             },
             "source": {
               "type": "string"
+            },
+            "status": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -4449,6 +4455,30 @@
             "bottom-right"
           ],
           "type": "string"
+        },
+        "WebConnectParams": {
+          "properties": {
+            "public_url": {
+              "description": "Externally reachable origin to build the connect link from, overriding\nthe `[web] public_url` config value for this link only.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "WebDisconnectParams": {
+          "properties": {
+            "session": {
+              "description": "Session handle reported by `web.sessions`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "session"
+          ],
+          "type": "object"
         },
         "WorkspaceCloseParams": {
           "properties": {
@@ -6437,6 +6467,54 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PluginPaneCloseParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "web.connect",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WebConnectParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "web.sessions",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "web.disconnect",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WebDisconnectParams"
             }
           },
           "required": [
@@ -10640,6 +10718,77 @@
             },
             {
               "properties": {
+                "bind": {
+                  "description": "Address the listener is bound to.",
+                  "type": "string"
+                },
+                "expires_in_secs": {
+                  "description": "Seconds the link stays valid.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "web_connect",
+                  "type": "string"
+                },
+                "url": {
+                  "description": "Link that logs a browser in and redirects it to the client.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "url",
+                "bind",
+                "expires_in_secs"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "sessions": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/WebSessionInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "web_session_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "sessions"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "closed_connections": {
+                  "description": "Live connections that were closed as part of the revocation.",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "session": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "web_disconnected",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "session",
+                "closed_connections"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "type": {
                   "const": "ok",
                   "type": "string"
@@ -10804,6 +10953,38 @@
             "focused",
             "pane_count",
             "agent_status"
+          ],
+          "type": "object"
+        },
+        "WebSessionInfo": {
+          "description": "A browser session holding a valid cookie, whether or not it is connected.",
+          "properties": {
+            "connections": {
+              "description": "Live browser connections currently attached under this session.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "created_unix": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "id": {
+              "description": "Short public handle for this session. Never the session token.",
+              "type": "string"
+            },
+            "last_seen_unix": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "id",
+            "created_unix",
+            "last_seen_unix",
+            "connections"
           ],
           "type": "object"
         },

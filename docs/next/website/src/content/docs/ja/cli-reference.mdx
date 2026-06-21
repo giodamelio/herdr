@@ -126,6 +126,16 @@ herdr server reload-agent-manifests
 
 `herdr server` はヘッドレスサーバーを明示的に起動します。監視下やサービス的な構成で使ってください。`reload-config` はペインを再起動せずにリロード可能な設定を適用します。`agent-manifests` は、アクティブなエージェント検出マニフェストのソース、キャッシュされたリモートバージョン、直近のリモート更新結果を表示します。`update-agent-manifests` はリモートマニフェストの更新を即座に取得し、実行中のサーバーにリロードして、更新後のマニフェスト状態を表示します。生のステータスレスポンスが欲しいときは `--json` を渡してください。`reload-agent-manifests` は、ローカルオーバーライドの編集後にエージェント検出マニフェストを実行中のサーバーにリロードします。
 
+## ブラウザクライアント
+
+```bash
+herdr web connect [--url ORIGIN] [--json]
+herdr web sessions [--json]
+herdr web disconnect <session>
+```
+
+`web connect` はブラウザをログインさせてクライアントへリダイレクトする使い捨てリンクを表示します。リンクは `[web] invite_ttl_secs` の経過後に失効します。`--url` はそのリンクに限り設定済みの `[web] public_url` を上書きします。`web sessions` はブラウザセッションと接続中の数を一覧します。`web disconnect` はセッションを失効させ、接続を即座に閉じます。いずれも `[web] enabled = true` が必要です。[ブラウザクライアント](/docs/web-client/) を参照してください。
+
 ## 通知
 
 ```bash

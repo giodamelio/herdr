@@ -127,6 +127,8 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
         should_quit,
         server_event_rx,
         server_event_tx,
+        web_config: crate::config::WebConfig::default(),
+        web: None,
     }
 }
 
@@ -7356,6 +7358,7 @@ fn completion_guard_api_session_replacement_does_not_notify_finished() {
                     agent_session_id: None,
                     agent_session_path: Some(new_session.clone()),
                     session_start_source: Some(reason.into()),
+                    status: None,
                 }),
             );
             let mut report = PaneReportAgentParams {

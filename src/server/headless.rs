@@ -256,6 +256,20 @@ pub struct HeadlessServer {
     server_event_rx: mpsc::Receiver<ServerEvent>,
     /// Sender for server events (cloned for each client thread).
     server_event_tx: mpsc::Sender<ServerEvent>,
+    /// Browser client settings, refreshed whenever config is reloaded.
+    web_config: crate::config::WebConfig,
+    /// Bound browser client listener, absent until the first `web.connect`.
+    web: Option<crate::web::WebRuntime>,
+}
+
+fn encode_api_success(id: String, result: api::schema::ResponseResult) -> String {
+    serde_json::to_string(&api::schema::SuccessResponse { id, result })
+        .unwrap_or_else(|_| "{}".to_string())
+}
+
+fn encode_api_error(id: String, error: api::schema::ErrorBody) -> String {
+    serde_json::to_string(&api::schema::ErrorResponse { id, error })
+        .unwrap_or_else(|_| "{}".to_string())
 }
 
 #[cfg(windows)]
@@ -316,6 +330,7 @@ impl HeadlessServer {
         api_tx: Option<api::ApiRequestSender>,
         api_server: Option<api::ServerHandle>,
         should_quit: Arc<AtomicBool>,
+        web_config: crate::config::WebConfig,
     ) -> io::Result<Self> {
         let client_path = client_socket_path();
         prepare_socket_path(&client_path)?;
@@ -382,6 +397,8 @@ impl HeadlessServer {
             should_quit,
             server_event_rx,
             server_event_tx,
+            web_config,
+            web: None,
         })
     }
 
@@ -408,6 +425,12 @@ impl HeadlessServer {
                 let _ = quit_notify.try_send(ServerEvent::QuitSignal);
             },
         );
+
+        if self.web_config.enabled && self.web_config.autostart {
+            if let Err(err) = self.ensure_web_runtime() {
+                warn!(err = %err.message, "failed to autostart the browser client listener");
+            }
+        }
 
         let mut needs_render = true;
         let mut needs_full_render = true;
@@ -910,6 +933,18 @@ impl HeadlessServer {
         self.server_config_diagnostic = server_config_diagnostic;
         self.server_config_diagnostic_without_keybindings =
             server_config_diagnostic_without_keybindings;
+        // An already-bound listener keeps its address and TTL; only the gate
+        // and the link origin can change without a restart. A read failure here
+        // is already reported through `report`, so keep the settings we have.
+        if let Ok(loaded) = crate::config::load_live_config() {
+            self.web_config = loaded.config.web;
+        }
+        // Turning the gate off has to actually stop serving, or browsers holding
+        // a cookie would keep working after the feature was disabled. Dropping
+        // the runtime shuts the listener down and takes its sessions with it.
+        if !self.web_config.enabled && self.web.take().is_some() {
+            info!("browser client disabled; listener stopped");
+        }
         self.sync_foreground_client_state();
         report
     }
@@ -1442,6 +1477,118 @@ impl HeadlessServer {
             warn!(client_id, terminal_id = %terminal_id, err = %err, "terminal attach scroll failed");
         }
         true
+    }
+
+    fn check_web_enabled(&self) -> Result<(), api::schema::ErrorBody> {
+        if self.web_config.enabled {
+            return Ok(());
+        }
+        Err(api::schema::ErrorBody {
+            code: "web_disabled".into(),
+            message: "the browser client is disabled; set `enabled = true` under [web] in your herdr config and run `herdr server reload-config`".into(),
+        })
+    }
+
+    /// Binds the browser listener if it is not already up.
+    ///
+    /// Only `web.connect` calls this. The listener outlives every browser
+    /// session by design, so it only ever runs once per server, and reporting
+    /// commands must not open a socket as a side effect.
+    fn ensure_web_runtime(&mut self) -> Result<&crate::web::WebRuntime, api::schema::ErrorBody> {
+        self.check_web_enabled()?;
+
+        if self.web.is_none() {
+            let runtime = crate::web::WebRuntime::start(&self.web_config).map_err(|err| {
+                api::schema::ErrorBody {
+                    code: "web_bind_failed".into(),
+                    message: err.to_string(),
+                }
+            })?;
+            self.web = Some(runtime);
+        }
+
+        Ok(self
+            .web
+            .as_ref()
+            .expect("the runtime was just started or already present"))
+    }
+
+    fn handle_web_connect(&mut self, id: String, params: api::schema::WebConnectParams) -> String {
+        let runtime = match self.ensure_web_runtime() {
+            Ok(runtime) => runtime,
+            Err(error) => return encode_api_error(id, error),
+        };
+
+        let bind = runtime.bind().to_string();
+        match runtime.connect_link(params.public_url.as_deref()) {
+            Ok((url, expires_in_secs)) => encode_api_success(
+                id,
+                api::schema::ResponseResult::WebConnect {
+                    url,
+                    bind,
+                    expires_in_secs,
+                },
+            ),
+            Err(err) => encode_api_error(
+                id,
+                api::schema::ErrorBody {
+                    code: "web_connect_failed".into(),
+                    message: err.to_string(),
+                },
+            ),
+        }
+    }
+
+    fn handle_web_sessions(&mut self, id: String) -> String {
+        if let Err(error) = self.check_web_enabled() {
+            return encode_api_error(id, error);
+        }
+
+        // No listener means no sessions, which is an empty list rather than an
+        // error — and reporting must not bind one just to say so.
+        let sessions = self
+            .web
+            .as_ref()
+            .map(crate::web::WebRuntime::sessions)
+            .unwrap_or_default();
+        encode_api_success(id, api::schema::ResponseResult::WebSessionList { sessions })
+    }
+
+    fn handle_web_disconnect(
+        &mut self,
+        id: String,
+        params: api::schema::WebDisconnectParams,
+    ) -> String {
+        if let Err(error) = self.check_web_enabled() {
+            return encode_api_error(id, error);
+        }
+
+        let Some(runtime) = self.web.as_ref() else {
+            return encode_api_error(
+                id,
+                api::schema::ErrorBody {
+                    code: "not_found".into(),
+                    message: format!("no browser session named {}", params.session),
+                },
+            );
+        };
+
+        match runtime.disconnect(&params.session) {
+            Some(closed_connections) => encode_api_success(
+                id,
+                api::schema::ResponseResult::WebDisconnected {
+                    session: params.session,
+                    closed_connections,
+                },
+            ),
+            None => encode_api_error(
+                id,
+                api::schema::ErrorBody {
+                    code: "not_found".into(),
+                    message: format!("no browser session named {}", params.session),
+                },
+            ),
+        }
     }
 
     fn handle_terminal_attach_mouse(
@@ -3035,6 +3182,27 @@ impl HeadlessServer {
                 self.handle_notification_show_api(msg.request.id.clone(), params.clone());
             let _ = msg.respond_to.send(response);
             return true;
+        }
+
+        // The browser listener and its tokens are server-owned, not app state,
+        // so these never reach `App::handle_api_request`.
+        match &msg.request.method {
+            api::schema::Method::WebConnect(params) => {
+                let response = self.handle_web_connect(msg.request.id.clone(), params.clone());
+                let _ = msg.respond_to.send(response);
+                return false;
+            }
+            api::schema::Method::WebSessions(_) => {
+                let response = self.handle_web_sessions(msg.request.id.clone());
+                let _ = msg.respond_to.send(response);
+                return false;
+            }
+            api::schema::Method::WebDisconnect(params) => {
+                let response = self.handle_web_disconnect(msg.request.id.clone(), params.clone());
+                let _ = msg.respond_to.send(response);
+                return false;
+            }
+            _ => {}
         }
 
         match &msg.request.method {

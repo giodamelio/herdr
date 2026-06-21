@@ -126,6 +126,16 @@ herdr server reload-agent-manifests
 
 `herdr server` 显式运行无界面服务器,适合被监管或服务式的部署。`reload-config` 在不重启窗格的情况下应用可重载设置。`agent-manifests` 显示生效的智能体检测清单来源、缓存的远程版本和最近的远程更新结果。`update-agent-manifests` 立即拉取远程清单更新,重载到运行中的服务器,并打印更新后的清单状态;要原始状态响应就加 `--json`。`reload-agent-manifests` 在编辑本地覆盖后,把智能体检测清单重载到运行中的服务器。
 
+## 浏览器客户端
+
+```bash
+herdr web connect [--url ORIGIN] [--json]
+herdr web sessions [--json]
+herdr web disconnect <session>
+```
+
+`web connect` 打印一个一次性链接，用于登录浏览器并重定向到客户端；链接在 `[web] invite_ttl_secs` 之后失效。`--url` 仅为该链接覆盖已配置的 `[web] public_url`。`web sessions` 列出浏览器会话及其活动连接数。`web disconnect` 撤销会话并立即关闭其连接。三者都需要 `[web] enabled = true`。参见[浏览器客户端](/docs/web-client/)。
+
 ## 通知
 
 ```bash

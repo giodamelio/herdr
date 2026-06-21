@@ -1177,6 +1177,17 @@
           "description": "Optional mp3 file path for \"request\" notifications. Relative paths are resolved from the config file's directory."
         },
         {
+          "key": "ui.sound.agents.hammond_tui",
+          "type": "enum",
+          "default": "\"default\"",
+          "description": "Sound override for detected Hammond TUI agents.",
+          "values": [
+            "default",
+            "on",
+            "off"
+          ]
+        },
+        {
           "key": "ui.sound.agents.pi",
           "type": "enum",
           "default": "\"default\"",
@@ -1459,6 +1470,42 @@
           "type": "boolean",
           "default": "true",
           "description": "Add keepalive fallbacks and private connection reuse for `herdr --remote`. Set false to run plain ssh unchanged."
+        }
+      ]
+    },
+    {
+      "id": "web",
+      "title": "Browser client",
+      "keys": [
+        {
+          "key": "web.enabled",
+          "type": "boolean",
+          "default": "false",
+          "description": "Serve the herdr TUI to a browser. While false no listener is bound and every herdr web command is refused."
+        },
+        {
+          "key": "web.bind",
+          "type": "string",
+          "default": "\"127.0.0.1:0\"",
+          "description": "Address the browser client listener binds to. The default keeps it on loopback with a kernel-assigned port."
+        },
+        {
+          "key": "web.public_url",
+          "type": "string",
+          "default": "\"\"",
+          "description": "Externally reachable origin that fronts the listener, used to build the link herdr web connect prints. Empty derives http://<bind>. Session cookies are only marked Secure when this is an https origin."
+        },
+        {
+          "key": "web.autostart",
+          "type": "boolean",
+          "default": "false",
+          "description": "Bind the listener when the server starts instead of on the first herdr web connect."
+        },
+        {
+          "key": "web.invite_ttl_secs",
+          "type": "integer",
+          "default": "300",
+          "description": "How long a connect link stays valid before it must be reissued."
         }
       ]
     },
