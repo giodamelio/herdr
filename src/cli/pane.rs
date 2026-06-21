@@ -1062,7 +1062,7 @@ fn pane_report_agent(args: &[String]) -> std::io::Result<i32> {
 
 fn pane_report_agent_session(args: &[String]) -> std::io::Result<i32> {
     let Some(raw_pane_id) = args.first() else {
-        eprintln!("usage: herdr pane report-agent-session <pane_id> --source ID --agent LABEL [--seq N] [--agent-session-id ID] [--agent-session-path PATH] [--session-start-source SOURCE]");
+        eprintln!("usage: herdr pane report-agent-session <pane_id> --source ID --agent LABEL [--seq N] [--agent-session-id ID] [--agent-session-path PATH] [--session-start-source SOURCE] [--status working|blocked|idle]");
         return Ok(2);
     };
 
@@ -1073,6 +1073,7 @@ fn pane_report_agent_session(args: &[String]) -> std::io::Result<i32> {
     let mut agent_session_id = None;
     let mut agent_session_path = None;
     let mut session_start_source = None;
+    let mut status = None;
 
     let mut index = 1;
     while index < args.len() {
@@ -1125,6 +1126,14 @@ fn pane_report_agent_session(args: &[String]) -> std::io::Result<i32> {
                 session_start_source = Some(value.clone());
                 index += 2;
             }
+            "--status" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --status");
+                    return Ok(2);
+                };
+                status = Some(value.clone());
+                index += 2;
+            }
             other => {
                 eprintln!("unknown option: {other}");
                 return Ok(2);
@@ -1153,6 +1162,7 @@ fn pane_report_agent_session(args: &[String]) -> std::io::Result<i32> {
             agent_session_id,
             agent_session_path,
             session_start_source,
+            status,
         },
     ))
 }

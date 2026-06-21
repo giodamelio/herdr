@@ -288,6 +288,8 @@ pub struct PaneReportAgentSessionParams {
     pub agent_session_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_start_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
