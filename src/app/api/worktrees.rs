@@ -129,6 +129,7 @@ impl App {
             ws_idx,
             entry.path.clone(),
             canonical_path != crate::worktree::canonical_or_original(&source.source_repo_root),
+            entry.workspace_name.clone(),
             !created_workspace,
         );
         if let Some(label) = params.label {
@@ -198,7 +199,7 @@ impl App {
             let space = crate::workspace::git_space_metadata(&path).ok_or_else(|| {
                 ApiFailure::new(
                     "not_git_worktree",
-                    "Herdr worktree actions require a path inside a Git work tree",
+                    "Herdr worktree actions require a path inside a jj repository",
                 )
             })?;
             if space.is_linked_worktree {
@@ -258,7 +259,7 @@ impl App {
             let space = crate::workspace::git_space_metadata(&path).ok_or_else(|| {
                 ApiFailure::new(
                     "not_git_worktree",
-                    "Herdr worktree actions require a path inside a Git work tree",
+                    "Herdr worktree actions require a path inside a jj repository",
                 )
             })?;
             let workspace_idx = self.list_source_workspace_idx_for_space(&space);
@@ -310,7 +311,7 @@ impl App {
         let Some(space) = git_space else {
             return Err(ApiFailure::new(
                 "not_git_worktree",
-                "Herdr worktree actions require a workspace inside a Git work tree",
+                "Herdr worktree actions require a workspace inside a jj repository",
             ));
         };
         if space.is_linked_worktree {
@@ -366,7 +367,7 @@ impl App {
         let Some(space) = git_space else {
             return Err(ApiFailure::new(
                 "not_git_worktree",
-                "Herdr worktree actions require a workspace inside a Git work tree",
+                "Herdr worktree actions require a workspace inside a jj repository",
             ));
         };
         let workspace_idx = if space.is_linked_worktree {
@@ -394,8 +395,13 @@ impl App {
             created_parent = true;
         }
         if let Some(ws_idx) = source.workspace_idx {
-            let membership =
-                worktree_membership(source, source.source_checkout_path.clone(), false);
+            // The non-linked parent is always the jj default workspace.
+            let membership = worktree_membership(
+                source,
+                source.source_checkout_path.clone(),
+                false,
+                "default".to_string(),
+            );
             self.set_worktree_membership(ws_idx, membership, !created_parent);
             if created_parent && emit_created_event {
                 self.emit_workspace_open_events(ws_idx);
@@ -440,9 +446,15 @@ impl App {
         target_ws_idx: usize,
         target_path: PathBuf,
         target_is_linked_worktree: bool,
+        target_workspace_name: String,
         emit_update: bool,
     ) {
-        let membership = worktree_membership(source, target_path, target_is_linked_worktree);
+        let membership = worktree_membership(
+            source,
+            target_path,
+            target_is_linked_worktree,
+            target_workspace_name,
+        );
         self.set_worktree_membership(target_ws_idx, membership, emit_update);
     }
 
@@ -706,6 +718,7 @@ fn worktree_membership(
     source: &WorktreeSource,
     checkout_path: PathBuf,
     is_linked_worktree: bool,
+    workspace_name: String,
 ) -> crate::workspace::WorktreeSpaceMembership {
     crate::workspace::WorktreeSpaceMembership {
         key: source.repo_key.clone(),
@@ -713,6 +726,7 @@ fn worktree_membership(
         repo_root: source.source_repo_root.clone(),
         checkout_path,
         is_linked_worktree,
+        workspace_name,
     }
 }
 
@@ -738,31 +752,20 @@ mod tests {
         std::env::temp_dir().join(format!("herdr-{name}-{}-{nanos}", std::process::id()))
     }
 
-    fn run_git(repo: &Path, args: &[&str]) {
-        let status = std::process::Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .args(args)
-            .status()
-            .unwrap();
-        assert!(
-            status.success(),
-            "git command failed: git -C {} {}",
-            repo.display(),
-            args.join(" ")
-        );
-    }
-
     fn create_committed_repo(name: &str) -> PathBuf {
         let repo = unique_temp_path(name);
         std::fs::create_dir_all(&repo).unwrap();
-        run_git(&repo, &["init", "--quiet"]);
-        run_git(&repo, &["config", "user.email", "herdr@example.invalid"]);
-        run_git(&repo, &["config", "user.name", "Herdr Test"]);
-        std::fs::write(repo.join("README.md"), "test\n").unwrap();
-        run_git(&repo, &["add", "README.md"]);
-        run_git(&repo, &["commit", "--quiet", "-m", "initial"]);
+        crate::workspace::git::test_support::init_colocated_repo(&repo);
         repo
+    }
+
+    /// Create a jj workspace `branch` checked out at `checkout`.
+    fn add_worktree(repo: &Path, branch: &str, checkout: &Path) {
+        if let Some(parent) = checkout.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let commands = crate::worktree::build_worktree_add_commands(repo, checkout, branch, "HEAD");
+        crate::worktree::run_worktree_commands(&commands).unwrap();
     }
 
     fn test_app() -> App {
@@ -956,9 +959,6 @@ mod tests {
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
         }
-        let remove =
-            crate::worktree::build_worktree_remove_command(&repo, Path::new(&worktree.path), false);
-        crate::worktree::run_worktree_command(&remove).unwrap();
         let _ = std::fs::remove_dir_all(worktree_root);
         let _ = std::fs::remove_dir_all(repo);
     }
@@ -1046,7 +1046,6 @@ mod tests {
         let repo = create_committed_repo("api-worktree-create-existing-branch-repo");
         let worktree_root = unique_temp_path("api-worktree-create-existing-branch-root");
         let branch = "foo";
-        run_git(&repo, &["branch", branch]);
         let mut app = test_app();
         let mut parent = Workspace::test_new("main");
         parent.identity_cwd = repo.clone();
@@ -1077,16 +1076,9 @@ mod tests {
         assert_eq!(worktree.branch.as_deref(), Some(branch));
         let checkout = Path::new(&worktree.path);
         assert!(checkout.join("README.md").exists());
-        let branch_name = std::process::Command::new("git")
-            .arg("-C")
-            .arg(checkout)
-            .args(["branch", "--show-current"])
-            .output()
-            .unwrap();
-        assert!(branch_name.status.success());
         assert_eq!(
-            String::from_utf8(branch_name.stdout).unwrap().trim(),
-            branch
+            crate::workspace::git_branch(checkout).as_deref(),
+            Some(branch)
         );
         assert!(app.pending_api_worktree_creates.is_empty());
 
@@ -1101,17 +1093,10 @@ mod tests {
     fn deferred_api_worktree_create_failure_clears_pending_checkout() {
         let repo = create_committed_repo("api-worktree-create-failure-repo");
         let worktree_root = unique_temp_path("api-worktree-create-failure-root");
-        let branch_name = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&repo)
-            .args(["branch", "--show-current"])
-            .output()
-            .unwrap();
-        assert!(branch_name.status.success());
-        let branch = String::from_utf8(branch_name.stdout)
-            .unwrap()
-            .trim()
-            .to_string();
+        // Pre-create the bookmark so `jj bookmark create` in the add commands
+        // fails, making the worktree create fail deterministically.
+        let branch = "foo".to_string();
+        crate::workspace::git::test_support::jj(&repo, &["bookmark", "create", &branch, "-r", "@"]);
         let mut app = test_app();
         let mut parent = Workspace::test_new("main");
         parent.identity_cwd = repo.clone();
@@ -1146,7 +1131,7 @@ mod tests {
         app.handle_internal_event(event);
         let response = second_rx
             .recv_timeout(std::time::Duration::from_secs(2))
-            .expect("retry should reach git instead of pending guard");
+            .expect("retry should reach jj instead of pending guard");
         let error: ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(error.error.code, "worktree_create_failed");
         assert_ne!(error.error.code, "worktree_operation_in_progress");
@@ -1175,6 +1160,7 @@ mod tests {
             repo_root: "/repo/other".into(),
             checkout_path: "/repo/other".into(),
             is_linked_worktree: false,
+            workspace_name: "default".into(),
         });
         let (respond_to, response_rx) = response_channel();
 
@@ -1190,6 +1176,7 @@ mod tests {
                 source_repo_root: repo.clone(),
                 repo_key: "repo-key".into(),
                 repo_name: "herdr".into(),
+                workspace_name: "default".into(),
                 label: None,
                 focus: false,
                 respond_to,
@@ -1245,7 +1232,7 @@ mod tests {
             },
         );
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
-        let ResponseResult::WorktreeCreated { worktree, .. } = success.result else {
+        let ResponseResult::WorktreeCreated { .. } = success.result else {
             panic!("expected worktree_created response");
         };
 
@@ -1270,9 +1257,6 @@ mod tests {
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
         }
-        let remove =
-            crate::worktree::build_worktree_remove_command(&repo, Path::new(&worktree.path), false);
-        crate::worktree::run_worktree_command(&remove).unwrap();
         let _ = std::fs::remove_dir_all(worktree_root);
         let _ = std::fs::remove_dir_all(repo);
     }
@@ -1371,18 +1355,7 @@ mod tests {
     fn api_worktree_open_reuses_already_open_checkout_from_subdirectory() {
         let repo = create_committed_repo("api-worktree-open-repo");
         let checkout = unique_temp_path("api-worktree-open-checkout");
-        run_git(
-            &repo,
-            &[
-                "worktree",
-                "add",
-                "--quiet",
-                "-b",
-                "worktree/api-open",
-                checkout.to_str().unwrap(),
-                "HEAD",
-            ],
-        );
+        add_worktree(&repo, "worktree/api-open", &checkout);
         let subdir = checkout.join("nested");
         std::fs::create_dir_all(&subdir).unwrap();
 
@@ -1439,8 +1412,6 @@ mod tests {
             )
         }));
 
-        let remove = crate::worktree::build_worktree_remove_command(&repo, &checkout, false);
-        crate::worktree::run_worktree_command(&remove).unwrap();
         let _ = std::fs::remove_dir_all(repo);
     }
 
@@ -1448,18 +1419,7 @@ mod tests {
     fn api_worktree_open_label_on_already_open_checkout_emits_rename_event() {
         let repo = create_committed_repo("api-worktree-open-label-repo");
         let checkout = unique_temp_path("api-worktree-open-label-checkout");
-        run_git(
-            &repo,
-            &[
-                "worktree",
-                "add",
-                "--quiet",
-                "-b",
-                "worktree/api-open-label",
-                checkout.to_str().unwrap(),
-                "HEAD",
-            ],
-        );
+        add_worktree(&repo, "worktree/api-open-label", &checkout);
 
         let event_hub = crate::api::EventHub::default();
         let mut app = test_app_with_event_hub(event_hub.clone());
@@ -1517,8 +1477,6 @@ mod tests {
             )
         }));
 
-        let remove = crate::worktree::build_worktree_remove_command(&repo, &checkout, false);
-        crate::worktree::run_worktree_command(&remove).unwrap();
         let _ = std::fs::remove_dir_all(repo);
     }
 
@@ -1579,18 +1537,7 @@ mod tests {
     fn api_worktree_list_reports_open_workspace_ids() {
         let repo = create_committed_repo("api-worktree-list-repo");
         let checkout = unique_temp_path("api-worktree-list-checkout");
-        run_git(
-            &repo,
-            &[
-                "worktree",
-                "add",
-                "--quiet",
-                "-b",
-                "worktree/api-list",
-                checkout.to_str().unwrap(),
-                "HEAD",
-            ],
-        );
+        add_worktree(&repo, "worktree/api-list", &checkout);
         let mut app = app_with_parent(&repo);
         let mut child = Workspace::test_new("child");
         child.identity_cwd = checkout.clone();
@@ -1619,8 +1566,6 @@ mod tests {
         );
         assert!(entry.is_linked_worktree);
 
-        let remove = crate::worktree::build_worktree_remove_command(&repo, &checkout, false);
-        crate::worktree::run_worktree_command(&remove).unwrap();
         let _ = std::fs::remove_dir_all(repo);
     }
 
@@ -1628,18 +1573,7 @@ mod tests {
     fn api_worktree_list_accepts_linked_checkout_sources() {
         let repo = create_committed_repo("api-worktree-list-linked-repo");
         let checkout = unique_temp_path("api-worktree-list-linked-checkout");
-        run_git(
-            &repo,
-            &[
-                "worktree",
-                "add",
-                "--quiet",
-                "-b",
-                "worktree/api-list-linked",
-                checkout.to_str().unwrap(),
-                "HEAD",
-            ],
-        );
+        add_worktree(&repo, "worktree/api-list-linked", &checkout);
         let mut app = app_with_parent(&repo);
         let parent_id = app.state.workspaces[0].id.clone();
         let mut child = Workspace::test_new("child");
@@ -1680,27 +1614,15 @@ mod tests {
             }));
         }
 
-        let remove = crate::worktree::build_worktree_remove_command(&repo, &checkout, false);
-        crate::worktree::run_worktree_command(&remove).unwrap();
         let _ = std::fs::remove_dir_all(repo);
     }
 
     #[test]
-    fn api_worktree_list_preserves_prunable_entries() {
+    fn api_worktree_list_skips_workspace_with_deleted_checkout() {
         let repo = create_committed_repo("api-worktree-list-prunable-repo");
         let checkout = unique_temp_path("api-worktree-list-prunable-checkout");
-        run_git(
-            &repo,
-            &[
-                "worktree",
-                "add",
-                "--quiet",
-                "-b",
-                "worktree/api-list-prunable",
-                checkout.to_str().unwrap(),
-                "HEAD",
-            ],
-        );
+        add_worktree(&repo, "worktree/api-list-prunable", &checkout);
+        // Delete the checkout outside herdr; jj can no longer resolve its path.
         std::fs::remove_dir_all(&checkout).unwrap();
         let mut app = app_with_parent(&repo);
 
@@ -1712,18 +1634,17 @@ mod tests {
             }),
         });
 
+        // The deleted workspace is skipped, but the list still succeeds and
+        // reports the remaining (default) workspace.
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         let ResponseResult::WorktreeList { worktrees, .. } = success.result else {
             panic!("expected worktree_list response");
         };
-        let entry = worktrees
+        assert!(worktrees
             .iter()
-            .find(|entry| entry.branch.as_deref() == Some("worktree/api-list-prunable"))
-            .unwrap();
-        assert!(entry.is_prunable);
-        assert!(entry.is_linked_worktree);
+            .all(|entry| entry.branch.as_deref() != Some("worktree/api-list-prunable")));
+        assert!(!worktrees.is_empty());
 
-        run_git(&repo, &["worktree", "prune"]);
         let _ = std::fs::remove_dir_all(repo);
     }
 
@@ -1731,18 +1652,7 @@ mod tests {
     fn api_worktree_remove_requires_force_for_dirty_checkout() {
         let repo = create_committed_repo("api-worktree-remove-repo");
         let checkout = unique_temp_path("api-worktree-remove-checkout");
-        run_git(
-            &repo,
-            &[
-                "worktree",
-                "add",
-                "--quiet",
-                "-b",
-                "worktree/api-remove",
-                checkout.to_str().unwrap(),
-                "HEAD",
-            ],
-        );
+        add_worktree(&repo, "worktree/api-remove", &checkout);
         std::fs::write(checkout.join("README.md"), "dirty\n").unwrap();
 
         let mut app = app_with_parent(&repo);
@@ -1754,6 +1664,7 @@ mod tests {
             repo_root: repo.clone(),
             checkout_path: checkout.clone(),
             is_linked_worktree: true,
+            workspace_name: crate::worktree::workspace_name_for_branch("worktree/api-remove"),
         });
         let child_id = child.id.clone();
         app.state.workspaces.push(child);
@@ -1800,18 +1711,7 @@ mod tests {
     fn api_worktree_remove_emits_close_event_and_drains_runtime_shutdowns() {
         let repo = create_committed_repo("api-worktree-remove-event-repo");
         let checkout = unique_temp_path("api-worktree-remove-event-checkout");
-        run_git(
-            &repo,
-            &[
-                "worktree",
-                "add",
-                "--quiet",
-                "-b",
-                "worktree/api-remove-event",
-                checkout.to_str().unwrap(),
-                "HEAD",
-            ],
-        );
+        add_worktree(&repo, "worktree/api-remove-event", &checkout);
 
         let event_hub = crate::api::EventHub::default();
         let mut app = test_app_with_event_hub(event_hub.clone());
@@ -1823,6 +1723,7 @@ mod tests {
             repo_root: repo.clone(),
             checkout_path: checkout.clone(),
             is_linked_worktree: true,
+            workspace_name: crate::worktree::workspace_name_for_branch("worktree/api-remove-event"),
         });
         let child_id = child.id.clone();
         app.state.workspaces.push(child);
@@ -1884,18 +1785,7 @@ mod tests {
     fn deferred_api_worktree_remove_preserves_event_and_plugin_context() {
         let repo = create_committed_repo("api-worktree-remove-deferred-repo");
         let checkout = unique_temp_path("api-worktree-remove-deferred-checkout");
-        run_git(
-            &repo,
-            &[
-                "worktree",
-                "add",
-                "--quiet",
-                "-b",
-                "worktree/api-remove-deferred",
-                checkout.to_str().unwrap(),
-                "HEAD",
-            ],
-        );
+        add_worktree(&repo, "worktree/api-remove-deferred", &checkout);
 
         let event_hub = crate::api::EventHub::default();
         let mut app = test_app_with_event_hub(event_hub.clone());
@@ -1907,6 +1797,9 @@ mod tests {
             repo_root: repo.clone(),
             checkout_path: checkout.clone(),
             is_linked_worktree: true,
+            workspace_name: crate::worktree::workspace_name_for_branch(
+                "worktree/api-remove-deferred",
+            ),
         });
         let child_id = child.id.clone();
         app.state.workspaces.push(child);
@@ -1960,18 +1853,7 @@ mod tests {
     fn deferred_api_worktree_remove_rejects_duplicate_in_flight_request() {
         let repo = create_committed_repo("api-worktree-remove-duplicate-repo");
         let checkout = unique_temp_path("api-worktree-remove-duplicate-checkout");
-        run_git(
-            &repo,
-            &[
-                "worktree",
-                "add",
-                "--quiet",
-                "-b",
-                "worktree/api-remove-duplicate",
-                checkout.to_str().unwrap(),
-                "HEAD",
-            ],
-        );
+        add_worktree(&repo, "worktree/api-remove-duplicate", &checkout);
 
         let mut app = test_app();
         let mut child = Workspace::test_new("child");
@@ -1982,6 +1864,9 @@ mod tests {
             repo_root: repo.clone(),
             checkout_path: checkout.clone(),
             is_linked_worktree: true,
+            workspace_name: crate::worktree::workspace_name_for_branch(
+                "worktree/api-remove-duplicate",
+            ),
         });
         let child_id = child.id.clone();
         app.state.workspaces.push(child);
@@ -2024,18 +1909,7 @@ mod tests {
     fn deferred_api_worktree_remove_rejects_duplicate_checkout_path_in_flight_request() {
         let repo = create_committed_repo("api-worktree-remove-duplicate-path-repo");
         let checkout = unique_temp_path("api-worktree-remove-duplicate-path-checkout");
-        run_git(
-            &repo,
-            &[
-                "worktree",
-                "add",
-                "--quiet",
-                "-b",
-                "worktree/api-remove-duplicate-path",
-                checkout.to_str().unwrap(),
-                "HEAD",
-            ],
-        );
+        add_worktree(&repo, "worktree/api-remove-duplicate-path", &checkout);
 
         let mut app = test_app();
         let membership = crate::workspace::WorktreeSpaceMembership {
@@ -2044,6 +1918,9 @@ mod tests {
             repo_root: repo.clone(),
             checkout_path: checkout.clone(),
             is_linked_worktree: true,
+            workspace_name: crate::worktree::workspace_name_for_branch(
+                "worktree/api-remove-duplicate-path",
+            ),
         };
         let mut first = Workspace::test_new("first");
         first.identity_cwd = checkout.clone();
@@ -2127,18 +2004,7 @@ mod tests {
     fn deferred_api_worktree_remove_rejects_checkout_with_create_in_flight() {
         let repo = create_committed_repo("api-worktree-remove-create-in-flight-repo");
         let checkout = unique_temp_path("api-worktree-remove-create-in-flight-checkout");
-        run_git(
-            &repo,
-            &[
-                "worktree",
-                "add",
-                "--quiet",
-                "-b",
-                "worktree/api-remove-create-in-flight",
-                checkout.to_str().unwrap(),
-                "HEAD",
-            ],
-        );
+        add_worktree(&repo, "worktree/api-remove-create-in-flight", &checkout);
 
         let mut app = test_app();
         let mut child = Workspace::test_new("child");
@@ -2149,6 +2015,9 @@ mod tests {
             repo_root: repo.clone(),
             checkout_path: checkout.clone(),
             is_linked_worktree: true,
+            workspace_name: crate::worktree::workspace_name_for_branch(
+                "worktree/api-remove-create-in-flight",
+            ),
         });
         let child_id = child.id.clone();
         app.state.workspaces.push(child);
@@ -2174,8 +2043,6 @@ mod tests {
         let error: ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(error.error.code, "worktree_operation_in_progress");
         assert!(app.event_rx.try_recv().is_err());
-        let remove = crate::worktree::build_worktree_remove_command(&repo, &checkout, true);
-        let _ = crate::worktree::run_worktree_command(&remove);
         let _ = std::fs::remove_dir_all(repo);
     }
 
@@ -2191,6 +2058,7 @@ mod tests {
             repo_root: "/repo/herdr".into(),
             checkout_path: checkout.clone(),
             is_linked_worktree: true,
+            workspace_name: "default".into(),
         });
         let child_id = child.id.clone();
         app.state.workspaces.push(child);
@@ -2206,6 +2074,7 @@ mod tests {
             repo_root: "/repo/herdr".into(),
             checkout_path: "/repo/other".into(),
             is_linked_worktree: true,
+            workspace_name: "default".into(),
         });
         let (respond_to, response_rx) = response_channel();
 

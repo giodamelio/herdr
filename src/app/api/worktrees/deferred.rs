@@ -67,6 +67,8 @@ impl App {
                 repo_root: api.source_repo_root.clone(),
                 checkout_path: api.source_checkout_path.clone(),
                 is_linked_worktree: false,
+                // The non-linked source/parent is always the jj default workspace.
+                workspace_name: "default".to_string(),
             };
             if current == &expected {
                 return Some(ws_idx);
@@ -170,6 +172,7 @@ impl App {
                 .find(|ws| &ws.id == workspace_id)
                 .and_then(|ws| ws.worktree_space().cloned())
         });
+        let workspace_name = crate::worktree::workspace_name_for_branch(&branch);
         let api_request = ApiWorktreeAddRequest {
             id,
             operation_id,
@@ -180,6 +183,7 @@ impl App {
             source_repo_root: source.source_repo_root,
             repo_key: source.repo_key,
             repo_name: source.repo_name,
+            workspace_name,
             label: params.label,
             focus: params.focus,
             respond_to,
@@ -194,12 +198,13 @@ impl App {
                 Ok(())
             }
             .and_then(|()| {
-                crate::worktree::run_worktree_add_command(
+                let commands = crate::worktree::build_worktree_add_commands(
                     &source_checkout_path,
                     &path,
                     &branch,
                     &base,
-                )
+                );
+                crate::worktree::run_worktree_commands(&commands)
             });
             let _ = event_tx.blocking_send(AppEvent::WorktreeAddFinished(Box::new(
                 crate::events::WorktreeAddResult {
@@ -256,21 +261,23 @@ impl App {
             return;
         }
 
-        #[cfg(windows)]
+        // jj `workspace forget` always succeeds, so guard uncommitted changes
+        // with an explicit pre-check instead of relying on a failed remove.
+        if !params.force
+            && crate::worktree::checkout_has_dirty_files(&space.checkout_path).unwrap_or(false)
         {
-            if !params.force
-                && crate::worktree::checkout_has_dirty_files(&space.checkout_path).unwrap_or(false)
-            {
-                Self::send_api_response(
-                    respond_to,
-                    encode_error(
-                        id,
-                        "dirty_worktree_requires_force",
-                        crate::worktree::worktree_dirty_remove_message(&space.checkout_path),
+            Self::send_api_response(
+                respond_to,
+                encode_error(
+                    id,
+                    "dirty_worktree_requires_force",
+                    format!(
+                        "workspace at {} has uncommitted changes; pass force to remove it",
+                        space.checkout_path.display()
                     ),
-                );
-                return;
-            }
+                ),
+            );
+            return;
         }
 
         let workspace_internal_id = self.state.workspaces[ws_idx].id.clone();
@@ -307,11 +314,6 @@ impl App {
             .insert(checkout_key.clone(), operation_id);
         let workspace_snapshot = self.workspace_info(ws_idx);
         let worktree = self.worktree_info_for_membership(&space, None);
-        let command = crate::worktree::build_worktree_remove_command(
-            &space.repo_root,
-            &space.checkout_path,
-            params.force,
-        );
         let api_request = ApiWorktreeRemoveRequest {
             id,
             operation_id,
@@ -320,12 +322,12 @@ impl App {
         };
         let repo_root = space.repo_root;
         let path = space.checkout_path;
+        let workspace_name = space.workspace_name;
         let force = params.force;
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
-            let result = crate::worktree::run_worktree_remove_command_with_recovery(
-                &command, &repo_root, &path, force,
-            );
+            let result =
+                crate::worktree::remove_worktree_checkout(&repo_root, &workspace_name, &path);
             let _ = event_tx.blocking_send(AppEvent::WorktreeRemoveFinished(Box::new(
                 crate::events::WorktreeRemoveResult {
                     workspace_id: workspace_internal_id,
@@ -420,6 +422,7 @@ impl App {
             ws_idx,
             result.path.clone(),
             true,
+            api.workspace_name.clone(),
             !created_workspace,
         );
         if let Some(label) = api.label {
@@ -503,24 +506,18 @@ impl App {
             .remove(&api.checkout_key);
 
         if let Err(message) = result.result {
-            let code =
-                if !result.forced && crate::worktree::is_dirty_worktree_remove_error(&message) {
-                    "dirty_worktree_requires_force"
-                } else {
-                    "worktree_remove_failed"
-                };
+            // jj remove is guarded by an upfront dirty pre-check, so any error
+            // here is a genuine failure rather than a dirty-needs-force retry.
             if let Some(remove) = &mut self.state.worktree_remove {
                 if remove.workspace_id == result.workspace_id && remove.path == result.path {
                     remove.removing = false;
-                    if code == "dirty_worktree_requires_force" && !remove.force_confirmation {
-                        remove.force_confirmation = true;
-                        remove.error = None;
-                    } else {
-                        remove.error = Some(message.clone());
-                    }
+                    remove.error = Some(message.clone());
                 }
             }
-            Self::send_api_response(api.respond_to, encode_error(api.id, code, message));
+            Self::send_api_response(
+                api.respond_to,
+                encode_error(api.id, "worktree_remove_failed", message),
+            );
             return;
         }
 

@@ -1038,6 +1038,7 @@ mod tests {
                     repo_root: "/repo/herdr".into(),
                     checkout_path: checkout_path.into(),
                     is_linked_worktree: idx > 0,
+                    workspace_name: "default".into(),
                 });
         }
         app.state.active = None;
@@ -1072,6 +1073,7 @@ mod tests {
                     repo_root: "/repo/herdr".into(),
                     checkout_path: checkout_path.into(),
                     is_linked_worktree: idx > 0,
+                    workspace_name: "default".into(),
                 });
         }
         app.state.active = None;
@@ -1114,6 +1116,7 @@ mod tests {
                     repo_root: "/repo/herdr".into(),
                     checkout_path: checkout_path.into(),
                     is_linked_worktree: idx != 0,
+                    workspace_name: "default".into(),
                 });
         }
         app.state.active = Some(0);
@@ -1322,12 +1325,9 @@ mod tests {
 
     fn temp_git_repo(branch: &str) -> std::path::PathBuf {
         let repo = unique_temp_path("sidebar-drop-slot-repo");
-        fs::create_dir_all(repo.join(".git")).unwrap();
-        fs::write(
-            repo.join(".git/HEAD"),
-            format!("ref: refs/heads/{branch}\n"),
-        )
-        .unwrap();
+        fs::create_dir_all(&repo).unwrap();
+        crate::workspace::git::test_support::init_colocated_repo(&repo);
+        crate::workspace::git::test_support::jj(&repo, &["bookmark", "create", branch, "-r", "@"]);
         repo
     }
 
@@ -1339,6 +1339,7 @@ mod tests {
             repo_root: "/repo/herdr".into(),
             checkout_path: format!("/repo/{name}").into(),
             is_linked_worktree: name != "main",
+            workspace_name: "default".into(),
         });
         ws
     }
