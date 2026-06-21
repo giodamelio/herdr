@@ -985,6 +985,7 @@ mod tests {
             repo_root: missing.join("repo"),
             checkout_path: missing.join("checkout"),
             is_linked_worktree: true,
+            workspace_name: "default".into(),
         };
 
         assert_eq!(restored_worktree_space_membership(Some(membership)), None);

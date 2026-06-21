@@ -310,6 +310,14 @@ fn wrapped_agent_name_from_runtime_argv(runtime: &str, argv: Option<&[String]>) 
         "cmd" => windows_cmd_arg_agent_name(argv),
         "powershell" | "pwsh" => powershell_arg_agent_name(argv),
         "tmux" => None,
+        "bwrap" => {
+            // Agent binary is the first arg after the last "--" separator
+            // Example: bwrap --proc /proc ... -- /nix/store/.../bin/claude --args
+            argv.iter()
+                .rposition(|a| a == "--")
+                .and_then(|i| argv.get(i + 1))
+                .and_then(|arg| agent_name_from_path_token(arg))
+        }
         _ => None,
     }
 }
@@ -534,6 +542,7 @@ fn is_generic_runtime_or_shell(name: &str) -> bool {
             | "cmd"
             | "powershell"
             | "pwsh"
+            | "bwrap"
     )
 }
 

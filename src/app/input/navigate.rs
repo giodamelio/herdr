@@ -1098,6 +1098,7 @@ mod tests {
             repo_root: "/repo/herdr".into(),
             checkout_path: format!("/repo/worktree-{ws_idx}").into(),
             is_linked_worktree: ws_idx != 0,
+            workspace_name: "default".into(),
         });
     }
 
@@ -1186,6 +1187,7 @@ mod tests {
             repo_root: "/repo/herdr".into(),
             checkout_path: "/repo/herdr-issue".into(),
             is_linked_worktree: true,
+            workspace_name: "default".into(),
         });
 
         execute_navigate_action_in_context(
@@ -1963,6 +1965,7 @@ last_pane = "prefix+tab"
             repo_root: "/repo/herdr".into(),
             checkout_path: "/repo/herdr-issue".into(),
             is_linked_worktree: true,
+            workspace_name: "default".into(),
         });
 
         execute_navigate_action(&mut state, NavigateAction::CloseWorkspace);

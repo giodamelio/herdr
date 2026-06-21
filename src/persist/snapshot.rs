@@ -847,6 +847,7 @@ mod tests {
             repo_root: PathBuf::from("/repo/herdr"),
             checkout_path: PathBuf::from("/repo/herdr/worktree-a"),
             is_linked_worktree: true,
+            workspace_name: "default".into(),
         });
 
         let snapshot = capture_from_state(&state);
