@@ -1177,6 +1177,17 @@
           "description": "Optional mp3 file path for \"request\" notifications. Relative paths are resolved from the config file's directory."
         },
         {
+          "key": "ui.sound.agents.hammond_tui",
+          "type": "enum",
+          "default": "\"default\"",
+          "description": "Sound override for detected Hammond TUI agents.",
+          "values": [
+            "default",
+            "on",
+            "off"
+          ]
+        },
+        {
           "key": "ui.sound.agents.pi",
           "type": "enum",
           "default": "\"default\"",
