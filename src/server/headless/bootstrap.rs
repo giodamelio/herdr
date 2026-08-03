@@ -69,6 +69,7 @@ pub fn run_server() -> io::Result<()> {
             Some(api_tx.clone()),
             Some(_api_server),
             should_quit,
+            loaded_config.config.web,
         ) {
             Ok(server) => server,
             Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
@@ -180,6 +181,7 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
             Some(api_tx.clone()),
             Some(api_server),
             should_quit,
+            loaded_config.config.web,
         )?;
         // Carried across before any client attaches, so the first title sent is
         // the override rather than the configured one it replaced.

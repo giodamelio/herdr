@@ -130,6 +130,16 @@ herdr server reload-agent-manifests
 
 `herdr server` runs the headless server explicitly. Use it for supervised or service-style setups. `reload-config` applies reloadable settings without restarting panes. `agent-manifests` shows the active agent detection manifest sources, cached remote versions, and last remote update results. `update-agent-manifests` fetches remote manifest updates immediately, reloads them into the running server, and prints the updated manifest status; pass `--json` for the raw status response. `reload-agent-manifests` reloads agent detection manifests into the running server after local override edits.
 
+## Browser client
+
+```bash
+herdr web connect [--url ORIGIN] [--json]
+herdr web sessions [--json]
+herdr web disconnect <session>
+```
+
+`web connect` prints a single-use link that logs a browser in and redirects it to the client; the link expires after `[web] invite_ttl_secs`. `--url` overrides the configured `[web] public_url` for that link only. `web sessions` lists browser sessions with their live connection counts. `web disconnect` revokes a session and closes its connections immediately. All three require `[web] enabled = true`. See [Browser client](/docs/web-client/).
+
 ## Notifications
 
 ```bash

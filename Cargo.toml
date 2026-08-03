@@ -21,6 +21,7 @@ include = [
 ]
 
 [dependencies]
+axum = { version = "0.8.9", default-features = false, features = ["ws", "http1", "tokio", "query"] }
 base64 = "0.22.1"
 bincode = { version = "2", features = ["serde"] }
 bytes = "1"
@@ -28,6 +29,8 @@ clap = { version = "4.5", default-features = false, features = ["std", "help", "
 clap_complete = "4.5"
 crossterm = "0.29"
 ctrlc = { version = "3", features = ["termination"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+getrandom = "0.3"
 interprocess = "2.4.2"
 jsonc-parser = { version = "0.33.1", default-features = false, features = ["cst", "serde_json"] }
 libc = "0.2"
@@ -40,13 +43,18 @@ serde_ignored = "0.1.14"
 serde_json = "1"
 sha2 = "0.10"
 time = { version = "0.3.47", features = ["formatting"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "net", "io-util"] }
 toml = "0.8"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 unicode-width = "0.2"
 unicode-segmentation = "1.13.1"
 schemars = { version = "1.2.1", features = ["derive"] }
+
+[dev-dependencies]
+# Blocking WebSocket client for the browser-client integration tests. Already in
+# the tree as an axum dependency, so this costs no extra compilation.
+tungstenite = "0.29"
 
 [patch.crates-io]
 portable-pty = { path = "vendor/portable-pty" }

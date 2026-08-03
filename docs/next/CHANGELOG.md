@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Browser client: `herdr web connect` prints a single-use link that opens the Herdr TUI in a browser, backed by the existing terminal-ANSI render path. Off by default behind `[web] enabled`. List and revoke sessions with `herdr web sessions` and `herdr web disconnect`.
+
 ## [0.9.1] - 2026-09-16
 
 ### Added

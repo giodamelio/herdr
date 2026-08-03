@@ -59,6 +59,7 @@ mod terminal_notify;
 mod terminal_theme;
 mod ui;
 mod update;
+mod web;
 mod workspace;
 mod worktree;
 
@@ -407,6 +408,24 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # force keepalive or multiplexing off, it only stops herdr from adding its own.
 # manage_ssh_config = true
 
+[web]
+# Serve the herdr TUI to a browser over `herdr web connect`. Off by default:
+# while this is false no listener is bound and every web command is refused.
+# enabled = false
+# Address the browser client listener binds to. The default keeps it on
+# loopback with a kernel-assigned port; front it with `tailscale serve` or an
+# ssh tunnel rather than binding a public interface.
+# bind = "127.0.0.1:0"
+# Externally reachable origin that fronts the listener, used to build the link
+# `herdr web connect` prints. Empty derives http://<bind>. Session cookies are
+# only marked Secure when this is an https origin, and browsers require a
+# secure context before a page may write to the clipboard.
+# public_url = ""
+# Bind the listener when the server starts instead of on the first connect.
+# autostart = false
+# How long a connect link stays valid before it must be reissued.
+# invite_ttl_secs = 300
+
 [experimental]
 # Allow launching herdr from inside a herdr-managed pane.
 # allow_nested = false
@@ -685,6 +704,10 @@ fn main() -> io::Result<()> {
                 "herdr integration <subcommand>",
                 "Manage built-in agent integrations",
             ),
+            (
+                "herdr web <subcommand>",
+                "Open this session in a browser client",
+            ),
         ] {
             println!("  {command:<32} {description}");
         }
@@ -766,6 +789,7 @@ fn main() -> io::Result<()> {
                 "pane",
                 "session",
                 "integration",
+                "web",
             ]
             .contains(&arg.as_str())
         {

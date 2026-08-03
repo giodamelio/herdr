@@ -127,6 +127,8 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
         should_quit,
         server_event_rx,
         server_event_tx,
+        web_config: crate::config::WebConfig::default(),
+        web: None,
     }
 }
 

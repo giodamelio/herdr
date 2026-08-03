@@ -1250,6 +1250,17 @@ impl App {
             Method::PluginPaneClose(params) => {
                 return self.handle_plugin_pane_close(request.id, params);
             }
+            // The headless server intercepts these before they reach the app,
+            // because the listener and its tokens are server-owned. Reaching
+            // here means there is no server, so there is no client socket for
+            // a browser to bridge to either.
+            Method::WebConnect(_) | Method::WebSessions(_) | Method::WebDisconnect(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "server_unavailable",
+                    "the browser client requires the herdr server; it is unavailable in --no-session mode",
+                );
+            }
             _ => {
                 return responses::encode_error(
                     request.id,

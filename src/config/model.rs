@@ -323,6 +323,7 @@ pub struct Config {
     pub advanced: AdvancedConfig,
     pub experimental: ExperimentalConfig,
     pub remote: RemoteConfig,
+    pub web: WebConfig,
 }
 
 #[derive(Debug)]
@@ -1022,6 +1023,40 @@ pub struct AdvancedConfig {
     /// Maximum scrollback buffer size in bytes retained per pane terminal. Default: 10000000.
     #[serde(alias = "scrollback_lines")]
     pub scrollback_limit_bytes: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct WebConfig {
+    /// Allow the browser client at all. While false every `web.*` method is
+    /// refused and no listener is ever bound. Default: false.
+    pub enabled: bool,
+    /// Address the browser client listener binds to. Default: "127.0.0.1:0"
+    /// (loopback, kernel-assigned port).
+    pub bind: String,
+    /// Externally reachable origin that fronts the listener, for example
+    /// "https://box.tail1234.ts.net" when `tailscale serve` terminates TLS.
+    /// Empty derives `http://<bind>`. Session cookies are only marked `Secure`
+    /// when this resolves to an https origin.
+    pub public_url: String,
+    /// Bind the listener at server startup instead of on the first
+    /// `herdr web connect`. Default: false.
+    pub autostart: bool,
+    /// How long a connect link stays valid before it must be reissued.
+    /// Default: 300.
+    pub invite_ttl_secs: u64,
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: "127.0.0.1:0".to_string(),
+            public_url: String::new(),
+            autostart: false,
+            invite_ttl_secs: 300,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

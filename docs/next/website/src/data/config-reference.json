@@ -1463,6 +1463,42 @@
       ]
     },
     {
+      "id": "web",
+      "title": "Browser client",
+      "keys": [
+        {
+          "key": "web.enabled",
+          "type": "boolean",
+          "default": "false",
+          "description": "Serve the herdr TUI to a browser. While false no listener is bound and every herdr web command is refused."
+        },
+        {
+          "key": "web.bind",
+          "type": "string",
+          "default": "\"127.0.0.1:0\"",
+          "description": "Address the browser client listener binds to. The default keeps it on loopback with a kernel-assigned port."
+        },
+        {
+          "key": "web.public_url",
+          "type": "string",
+          "default": "\"\"",
+          "description": "Externally reachable origin that fronts the listener, used to build the link herdr web connect prints. Empty derives http://<bind>. Session cookies are only marked Secure when this is an https origin."
+        },
+        {
+          "key": "web.autostart",
+          "type": "boolean",
+          "default": "false",
+          "description": "Bind the listener when the server starts instead of on the first herdr web connect."
+        },
+        {
+          "key": "web.invite_ttl_secs",
+          "type": "integer",
+          "default": "300",
+          "description": "How long a connect link stays valid before it must be reissued."
+        }
+      ]
+    },
+    {
       "id": "advanced",
       "title": "Advanced",
       "keys": [
