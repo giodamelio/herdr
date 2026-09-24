@@ -35,16 +35,16 @@ fn parse_kitty_key_sequence(data: &str) -> Option<TerminalKey> {
         .and_then(|field| field.parse::<u32>().ok());
 
     let code = kitty_codepoint_to_keycode(codepoint)?;
+    let mut modifiers = key_modifiers_from_u8(modifier);
     let associated_text = match associated_text {
         Some(value) => match parse_kitty_associated_text(value) {
             Some(text) => Some(text),
-            None if matching_control_associated_text(value, code) => None,
+            None if matching_control_associated_text(value, code, modifiers) => None,
             None => return None,
         },
         None => None,
     };
     let kind = parse_kitty_event_type(event_type)?;
-    let mut modifiers = key_modifiers_from_u8(modifier);
     // Kitty permits the shifted alternate only while Shift is active. Normalize
     // contradictory reports here so they cannot dispatch an unshifted command.
     if matches!(code, KeyCode::Char(_))
@@ -54,11 +54,40 @@ fn parse_kitty_key_sequence(data: &str) -> Option<TerminalKey> {
         modifiers |= KeyModifiers::SHIFT;
     }
 
+    let associated_text = associated_text
+        .filter(|text| !is_redundant_command_text(text, code, modifiers, shifted_codepoint));
+
     let mut key = TerminalKey::new(code, modifiers).with_kind(kind);
     if let Some(shifted_codepoint) = shifted_codepoint {
         key = key.with_shifted_codepoint(shifted_codepoint);
     }
     Some(key.with_generated_text(associated_text))
+}
+
+// WezTerm attaches the key's own character to command chords, e.g. Ctrl-C as
+// ESC[99;5;99u. That text carries nothing the key code does not, and treating it
+// as input would send a bare "c". Composed text such as Option-a producing "å"
+// differs from the key's character and is kept.
+fn is_redundant_command_text(
+    text: &str,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    shifted_codepoint: Option<u32>,
+) -> bool {
+    if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) {
+        return false;
+    }
+    let KeyCode::Char(key_char) = code else {
+        return false;
+    };
+    let mut chars = text.chars();
+    let (Some(text_char), None) = (chars.next(), chars.next()) else {
+        return false;
+    };
+    text_char == key_char
+        || (modifiers.contains(KeyModifiers::SHIFT)
+            && key_char.to_uppercase().eq(std::iter::once(text_char)))
+        || shifted_codepoint == Some(u32::from(text_char))
 }
 
 fn parse_kitty_associated_text(value: &str) -> Option<String> {
@@ -76,7 +105,12 @@ fn parse_kitty_associated_text(value: &str) -> Option<String> {
 // WezTerm can attach the matching legacy control code in report-all mode even
 // though the Kitty protocol forbids control characters in associated text.
 // Keep the unambiguous key event, but never expose that field as generated text.
-fn matching_control_associated_text(value: &str, code: KeyCode) -> bool {
+fn matching_control_associated_text(value: &str, code: KeyCode, modifiers: KeyModifiers) -> bool {
+    if let KeyCode::Char(ch) = code {
+        return modifiers.contains(KeyModifiers::CONTROL)
+            && ctrl_char_control_code(ch)
+                .is_some_and(|control| value.parse::<u32>() == Ok(u32::from(control)));
+    }
     matches!(
         (code, value),
         (KeyCode::Enter, "13")
@@ -84,6 +118,16 @@ fn matching_control_associated_text(value: &str, code: KeyCode) -> bool {
             | (KeyCode::Tab, "9")
             | (KeyCode::Esc, "27")
     )
+}
+
+fn ctrl_char_control_code(ch: char) -> Option<u8> {
+    match ch {
+        'a'..='z' | 'A'..='Z' | '@' | '[' | '\\' | ']' | '^' | '_' => {
+            Some(ch.to_ascii_uppercase() as u8 & 0x1f)
+        }
+        ' ' => Some(0),
+        _ => None,
+    }
 }
 
 #[allow(dead_code)] // Reserved for the upcoming raw stdin parser.
@@ -792,6 +836,54 @@ mod tests {
     }
 
     #[test]
+    fn parse_wezterm_ctrl_chord_control_associated_text_keeps_key_event() {
+        for (sequence, ch) in [
+            ("\x1b[114;5;18u", 'r'),
+            ("\x1b[99;5;3u", 'c'),
+            ("\x1b[91;5;27u", '['),
+        ] {
+            let key = parse_terminal_key_sequence(sequence).expect("ctrl chord should parse");
+            assert_eq!(key.code, KeyCode::Char(ch));
+            assert_eq!(key.modifiers, KeyModifiers::CONTROL);
+            assert_eq!(key.kind, crossterm::event::KeyEventKind::Press);
+            assert_eq!(key.generated_text, None);
+        }
+    }
+
+    #[test]
+    fn parse_command_chord_drops_redundant_associated_text() {
+        for (sequence, ch, modifiers) in [
+            ("\x1b[114;5;114u", 'r', KeyModifiers::CONTROL),
+            ("\x1b[99;5;99u", 'c', KeyModifiers::CONTROL),
+            ("\x1b[120;3;120u", 'x', KeyModifiers::ALT),
+            ("\x1b[120;9;120u", 'x', KeyModifiers::SUPER),
+            (
+                "\x1b[114;6;82u",
+                'r',
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            (
+                "\x1b[49:33;6;33u",
+                '1',
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+        ] {
+            let key = parse_terminal_key_sequence(sequence).expect("chord should parse");
+            assert_eq!(key.code, KeyCode::Char(ch), "{sequence:?}");
+            assert_eq!(key.modifiers, modifiers, "{sequence:?}");
+            assert_eq!(key.generated_text, None, "{sequence:?}");
+        }
+    }
+
+    #[test]
+    fn parse_command_chord_keeps_composed_associated_text() {
+        let key = parse_terminal_key_sequence("\x1b[97;3;229u").expect("composed key should parse");
+        assert_eq!(key.code, KeyCode::Char('a'));
+        assert_eq!(key.modifiers, KeyModifiers::ALT);
+        assert_eq!(key.generated_text.as_deref(), Some("å"));
+    }
+
+    #[test]
     fn reject_malformed_kitty_associated_text() {
         assert_eq!(parse_terminal_key_sequence("\x1b[32;;1114112u"), None);
         assert_eq!(parse_terminal_key_sequence("\x1b[32;;20320:bad:u"), None);
@@ -804,6 +896,8 @@ mod tests {
         assert_eq!(parse_terminal_key_sequence("\x1b[27;1;9u"), None);
         assert_eq!(parse_terminal_key_sequence("\x1b[9;1;9:97u"), None);
         assert_eq!(parse_terminal_key_sequence("\x1b[27;1;27:27u"), None);
+        assert_eq!(parse_terminal_key_sequence("\x1b[114;5;3u"), None);
+        assert_eq!(parse_terminal_key_sequence("\x1b[114;1;18u"), None);
     }
 
     #[test]
