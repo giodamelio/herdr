@@ -32,6 +32,7 @@ pub(crate) use shutdown::monitor_host_shutdown;
 const WSL_MARKER_ENV_VARS: &[&str] = &["WSL_DISTRO_NAME", "WSL_INTEROP"];
 const PROCESS_DETECTION_ENV_VAR: &str = "HERDR_PROCESS_DETECTION";
 const CHILD_GROUPS_SCAN_LIMIT: usize = 64;
+const NESTED_PTY_WRAPPER_DEPTH_LIMIT: usize = 3;
 /// Upper bound on the number of processes visited while resolving a pane's
 /// foreground process-group tree. Foreground-job detection reads /proc/<pid>/stat
 /// and task/children files for every visited process on a repeated (per-tick/5s)
@@ -352,7 +353,82 @@ pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
             .then(|| child_groups_foreground_process_group(child_pid))
             .flatten()
     })?;
-    foreground_job_for_group(child_pid, process_group_id)
+    let job = foreground_job_for_group(child_pid, process_group_id)?;
+    Some(with_nested_pty_wrapper_jobs(
+        job,
+        process_task_ids,
+        process_task_children,
+        foreground_process_group_id,
+        foreground_job_for_group,
+    ))
+}
+
+/// Wrappers such as `devenv shell` run their shell on a private PTY, so the pane's
+/// tty only ever reports the wrapper as foreground while the agent runs in the inner
+/// tty's foreground job. Append each inner job's processes and keep the outer,
+/// kernel-observed group id so foreground-group change tracking stays stable.
+fn with_nested_pty_wrapper_jobs(
+    mut job: ForegroundJob,
+    mut task_ids: impl FnMut(u32, &mut ForegroundScanBudget) -> Vec<u32>,
+    mut task_children: impl FnMut(u32, u32, &mut ForegroundScanBudget) -> Vec<u32>,
+    mut tty_foreground_group: impl FnMut(u32) -> Option<u32>,
+    mut job_for_group: impl FnMut(u32, u32) -> Option<ForegroundJob>,
+) -> ForegroundJob {
+    let mut budget = ForegroundScanBudget::for_probe();
+    let mut scanned = 0usize;
+    let mut level_start = 0usize;
+    let mut level_group = job.process_group_id;
+
+    'levels: for _ in 0..NESTED_PTY_WRAPPER_DEPTH_LIMIT {
+        let Some(wrapper_pid) = job.processes[level_start..]
+            .iter()
+            .find(|process| is_nested_pty_wrapper(process))
+            .map(|process| process.pid)
+        else {
+            break;
+        };
+        if crate::detect::identify_agent_in_job(&job).is_some() {
+            break;
+        }
+
+        let mut inner = None;
+        for tid in task_ids(wrapper_pid, &mut budget) {
+            for child in task_children(wrapper_pid, tid, &mut budget) {
+                if scanned >= CHILD_GROUPS_SCAN_LIMIT {
+                    break 'levels;
+                }
+                scanned += 1;
+                if let Some(group) =
+                    tty_foreground_group(child).filter(|group| *group != level_group)
+                {
+                    inner = Some((child, group));
+                    break;
+                }
+            }
+            if inner.is_some() {
+                break;
+            }
+        }
+        let Some(inner_job) = inner.and_then(|(shell_pid, group)| job_for_group(shell_pid, group))
+        else {
+            break;
+        };
+
+        level_start = job.processes.len();
+        level_group = inner_job.process_group_id;
+        job.processes.extend(inner_job.processes);
+    }
+    job
+}
+
+fn is_nested_pty_wrapper(process: &ForegroundProcess) -> bool {
+    let argv0_basename = process
+        .argv
+        .as_deref()
+        .and_then(|argv| argv.first())
+        .and_then(|argv0| argv0.rsplit('/').next());
+    matches!(process.name.as_str(), "devenv" | ".devenv-wrapped")
+        || argv0_basename == Some("devenv")
 }
 
 fn foreground_job_for_group(child_pid: u32, process_group_id: u32) -> Option<ForegroundJob> {
@@ -1632,6 +1708,156 @@ mod tests {
         assert_eq!(job.processes[0].name, "codex");
         assert_eq!(job.processes[0].argv, None);
         assert_eq!(job.processes[1].argv, Some(vec!["process-201".to_string()]));
+    }
+
+    fn test_process(pid: u32, name: &str, argv: &[&str]) -> ForegroundProcess {
+        let argv: Vec<String> = argv.iter().map(|part| part.to_string()).collect();
+        ForegroundProcess {
+            pid,
+            name: name.to_string(),
+            argv0: None,
+            cmdline: Some(argv.join(" ")),
+            argv: Some(argv),
+        }
+    }
+
+    fn devenv_job() -> ForegroundJob {
+        ForegroundJob {
+            process_group_id: 200,
+            processes: vec![test_process(200, ".devenv-wrapped", &["devenv", "shell"])],
+        }
+    }
+
+    #[test]
+    fn nested_pty_wrapper_follows_devenv_to_a_bwrap_wrapped_agent() {
+        let claude = "/nix/store/abc-claude-code-2.1.281/bin/claude";
+        let tasks = HashMap::from([(200, vec![200, 201])]);
+        let children = HashMap::from([((200, 201), vec![300])]);
+        let job_requests = RefCell::new(Vec::new());
+
+        let job = with_nested_pty_wrapper_jobs(
+            devenv_job(),
+            |pid, _budget| tasks.get(&pid).cloned().unwrap_or_default(),
+            |pid, tid, _budget| children.get(&(pid, tid)).cloned().unwrap_or_default(),
+            |pid| (pid == 300).then_some(400),
+            |shell_pid, group| {
+                job_requests.borrow_mut().push((shell_pid, group));
+                Some(ForegroundJob {
+                    process_group_id: group,
+                    processes: vec![
+                        test_process(
+                            400,
+                            "bwrap",
+                            &["bwrap", "--ro-bind", "/", "/", "--", claude],
+                        ),
+                        test_process(
+                            401,
+                            "bwrap",
+                            &["bwrap", "--ro-bind", "/", "/", "--", claude],
+                        ),
+                        test_process(402, "claude", &[claude]),
+                    ],
+                })
+            },
+        );
+
+        assert_eq!(job_requests.into_inner(), vec![(300, 400)]);
+        assert_eq!(job.process_group_id, 200);
+        assert_eq!(
+            job.processes
+                .iter()
+                .map(|process| process.pid)
+                .collect::<Vec<_>>(),
+            vec![200, 400, 401, 402]
+        );
+        assert_eq!(
+            crate::detect::identify_agent_in_job(&job).map(|(agent, _)| agent),
+            Some(crate::detect::Agent::Claude)
+        );
+    }
+
+    #[test]
+    fn nested_pty_wrapper_without_an_agent_reports_the_inner_job() {
+        let job = with_nested_pty_wrapper_jobs(
+            devenv_job(),
+            |pid, _budget| vec![pid],
+            |pid, _tid, _budget| if pid == 200 { vec![300] } else { Vec::new() },
+            |pid| (pid == 300).then_some(300),
+            |_, group| {
+                Some(ForegroundJob {
+                    process_group_id: group,
+                    processes: vec![test_process(
+                        300,
+                        "zsh",
+                        &["/run/current-system/sw/bin/zsh", "-i"],
+                    )],
+                })
+            },
+        );
+
+        assert_eq!(job.process_group_id, 200);
+        assert_eq!(job.processes.len(), 2);
+        assert_eq!(crate::detect::identify_agent_in_job(&job), None);
+    }
+
+    #[test]
+    fn nested_pty_wrapper_skips_children_on_the_outer_tty() {
+        let job = with_nested_pty_wrapper_jobs(
+            devenv_job(),
+            |pid, _budget| vec![pid],
+            |_, _, _budget| vec![250, 300],
+            |pid| Some(if pid == 250 { 200 } else { 400 }),
+            |shell_pid, group| {
+                assert_eq!((shell_pid, group), (300, 400));
+                None
+            },
+        );
+
+        assert_eq!(job, devenv_job());
+    }
+
+    #[test]
+    fn nested_pty_wrapper_leaves_other_jobs_untouched() {
+        let job = ForegroundJob {
+            process_group_id: 200,
+            processes: vec![test_process(200, "sleep", &["sleep", "1000"])],
+        };
+
+        let result = with_nested_pty_wrapper_jobs(
+            job.clone(),
+            |_, _budget| panic!("non-wrapper jobs must not be scanned"),
+            |_, _, _budget| panic!("non-wrapper jobs must not be scanned"),
+            |_| panic!("non-wrapper jobs must not be scanned"),
+            |_, _| panic!("non-wrapper jobs must not be scanned"),
+        );
+
+        assert_eq!(result, job);
+    }
+
+    #[test]
+    fn nested_pty_wrapper_descent_is_bounded() {
+        let mut next_group = 300;
+        let mut descents = 0usize;
+
+        let job = with_nested_pty_wrapper_jobs(
+            devenv_job(),
+            |pid, _budget| vec![pid],
+            |pid, _, _budget| vec![pid + 1],
+            |_| {
+                next_group += 100;
+                Some(next_group)
+            },
+            |_, group| {
+                descents += 1;
+                Some(ForegroundJob {
+                    process_group_id: group,
+                    processes: vec![test_process(group, "devenv", &["devenv", "shell"])],
+                })
+            },
+        );
+
+        assert_eq!(descents, NESTED_PTY_WRAPPER_DEPTH_LIMIT);
+        assert_eq!(job.processes.len(), NESTED_PTY_WRAPPER_DEPTH_LIMIT + 1);
     }
 
     #[test]
